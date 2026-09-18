@@ -2,8 +2,9 @@
 define('BRIDGE_TEST',true);require __DIR__.'/action.php';
 $dir=sys_get_temp_dir().'/bridge-ui-'.bin2hex(random_bytes(6));mkdir($dir,0700);putenv('BRIDGE_DATA='.$dir);file_put_contents($dir.'/master.key',random_bytes(32));
 function test($value,$label){if(!$value)throw new RuntimeException($label);echo "PASS $label\n";}
-test(displayDate('2026-09-18T18:12:21+00:00')==='18:12:21 18.09.2026','date format with UTC preserved');
-test(displayDate('2026-09-18T21:12:21+03:00')==='18:12:21 18.09.2026','timezone conversion explicit');
+test(displayDate('2026-09-18T18:12:21+00:00','UTC')==='18:12:21 18.09.2026','date format with UTC preserved');
+test(displayDate('2026-09-18T21:12:21+03:00','UTC')==='18:12:21 18.09.2026','timezone conversion explicit');
+test(displayDate('2026-09-18T22:12:21+00:00')==='01:12:21 19.09.2026','Moscow default crosses midnight');
 $_GET=['page'=>'leads','owner'=>'u','state'=>'sent'];$cols=['created'];
 test(str_contains(sortHeading('created','Date',$cols),'dir=asc'),'first sort ascending');
 $_GET['sort']='created';$_GET['dir']='asc';test(str_contains(sortHeading('created','Date',$cols),'dir=desc'),'second sort descending');

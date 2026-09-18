@@ -2,7 +2,20 @@
 # Installed root-owned; invoked only by the restricted CI SSH key. Receives action.php on stdin.
 set -Eeuo pipefail
 umask 077
-exec 9>/run/lead-bridge-deploy.lock
+cd /
+# No privileged file operations in the application-writable data directory.
+control=/var/lib/lead-bridge-control
+for dir in /var /var/lib "$control" /var/www /var/www/lead-bridge; do
+  [[ -d "$dir" && ! -L "$dir" && $(stat -c %u "$dir") == 0 ]]
+  (( (8#$(stat -c %a "$dir") & 0022) == 0 ))
+done
+for file in deploy.lock dispatch.lock; do
+  path="$control/$file"
+  [[ -f "$path" && ! -L "$path" && $(stat -c %u "$path") == 0 && $(stat -c %h "$path") == 1 ]]
+  (( (8#$(stat -c %a "$path") & 0022) == 0 ))
+done
+# Read-only opens never truncate; root-only parent prevents replacement races.
+exec 9<"$control/deploy.lock"
 flock -w 180 9
 stage=$(mktemp -d /var/tmp/lead-bridge-release.XXXXXX)
 paused=0
@@ -17,7 +30,7 @@ cleanup() {
     systemctl restart lead-bridge.service || true
   fi
   if (( code != 0 && stopped )); then systemctl start lead-bridge.service || true; fi
-  if (( paused )); then rm -f /var/lib/lead-bridge/deploy.pause; fi
+  if (( paused )); then rm -f "$control/deploy.pause"; fi
   rm -rf -- "$stage"
   exit "$code"
 }
@@ -28,12 +41,10 @@ php -l "$stage/action.php"
 expected=$(sha256sum "$stage/action.php" | cut -d ' ' -f 1)
 systemctl start lead-bridge-backup.service
 cp /var/www/lead-bridge/action.php "$stage/previous.php"
-install -o leadbridge -g leadbridge -m 600 /dev/null /var/lib/lead-bridge/deploy.pause
+( set -o noclobber; umask 022; : > "$control/deploy.pause" )
 paused=1
 # Let the current lead finish. New workers also observe deploy.pause.
-touch /var/lib/lead-bridge/dispatch.lock
-chown leadbridge:leadbridge /var/lib/lead-bridge/dispatch.lock
-exec 8>/var/lib/lead-bridge/dispatch.lock
+exec 8<"$control/dispatch.lock"
 flock -w 180 8
 systemctl stop lead-bridge.service
 stopped=1
@@ -41,7 +52,7 @@ install -o root -g root -m 644 "$stage/action.php" /var/www/lead-bridge/action.p
 mv /var/www/lead-bridge/action.php.new /var/www/lead-bridge/action.php
 installed=1
 systemctl reload php8.3-fpm
-rm -f /var/lib/lead-bridge/deploy.pause
+rm -f "$control/deploy.pause"
 paused=0
 flock -u 8
 systemctl start lead-bridge.service

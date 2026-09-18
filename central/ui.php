@@ -1,7 +1,11 @@
 <?php
 // Presentation helpers. Database timestamps remain UTC; sorting is applied before pagination.
-function displayDate(string $value): string {
-    try{return (new DateTimeImmutable($value))->setTimezone(new DateTimeZone('UTC'))->format('H:i:s d.m.Y');}
+function userTimezone(): string {
+    $user=currentUser();$zone=$user?setting('timezone_'.$user['id']):'';
+    return in_array($zone,['Europe/Moscow','UTC'],true)?$zone:'Europe/Moscow';
+}
+function displayDate(string $value,?string $timezone=null): string {
+    try{return (new DateTimeImmutable($value))->setTimezone(new DateTimeZone($timezone??userTimezone()))->format('H:i:s d.m.Y');}
     catch(Throwable $e){return $value;}
 }
 function uiIcon(string $name): string {

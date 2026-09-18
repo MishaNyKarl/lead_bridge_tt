@@ -53,6 +53,11 @@ function assignRoute(string $routeId,string $owner): void {
 }
 function accountMutation(string $op): bool {
     $me=requireUser();
+    if($op==='timezone'){
+        $zone=(string)($_POST['timezone']??'');
+        if(!in_array($zone,['Europe/Moscow','UTC'],true))throw new InvalidArgumentException('Выберите Europe/Moscow или UTC');
+        setting('timezone_'.$me['id'],$zone);return true;
+    }
     if($op==='password'){
         if(!password_verify((string)($_POST['current_password']??''),$me['password']))throw new InvalidArgumentException('Неверный текущий пароль');
         $p=required($_POST,'password');if(strlen($p)<14||strlen($p)>72)throw new InvalidArgumentException('Пароль: от 14 до 72 символов');$epoch=bin2hex(random_bytes(16));

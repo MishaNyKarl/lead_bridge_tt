@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+python3 scripts/deploy_security_test.py
 python3 central/build.py
 for file in central/*.php central/dist/action.php; do php -l "$file"; done
 node central/sheets_test.cjs

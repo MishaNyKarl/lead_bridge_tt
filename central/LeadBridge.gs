@@ -46,7 +46,7 @@ function bridgeSetup() {
   var c=bridgeConfig(), r=bridgeFetch(c,{op:'check'});
   if(r.code!==200 || r.data.status!=='ok')throw Error('Ошибка подключения');
   SpreadsheetApp.getActiveSpreadsheet().getSheets().forEach(function(s){var h=bridgeHeaders(s,true);if(!h)return;
-    ['Lead ID','TikTok Lead ID','Phone','Campaign ID','Ad ID','Ad Group ID','Advertiser ID','Form ID','Binom Click ID','Partner Reference ID','Bridge Receipt'].forEach(function(k){var i=h.indexOf(k);if(i>=0)s.getRange(1,i+1,s.getMaxRows(),1).setNumberFormat('@');});
+    ['Lead ID','TikTok Lead ID','Phone','Campaign ID','Ad ID','Ad Group ID','Advertiser ID','Form ID','ADID_V2','Binom Click ID','Partner Reference ID','Bridge Receipt'].forEach(function(k){var i=h.indexOf(k);if(i>=0)s.getRange(1,i+1,s.getMaxRows(),1).setNumberFormat('@');});
   });
   SpreadsheetApp.getUi().alert('Подключение проверено. Связка '+(r.data.active?'активна':'на паузе')+'. Подготовлены колонки. Лиды не отправлялись. Перед включением удалите прежний триггер отправки.');
 }
@@ -66,6 +66,21 @@ function bridgeId(raw) {
   var s=String(raw).trim();if(!/^\d{1,40}$/.test(s))throw Error('ID должен быть строкой цифр');return s;
 }
 function bridgePhone(raw){var s=String(raw||'').trim();if(/[eE]/.test(s))throw Error('Телефон повреждён');var d=s.replace(/[^0-9]/g,'').replace(/^00/,'');if(!/^[1-9][0-9]{6,14}$/.test(d))throw Error('Телефон должен содержать код страны');return '+'+d;}
+// Alias matching is case-insensitive and ignores spaces/underscores; conflicting values fail closed.
+function bridgeMetaValue(h,row,names,id) {
+  var normalize=function(v){return String(v).trim().toLowerCase().replace(/[ _-]/g,'');};
+  var accepted=names.map(normalize),values=[];
+  h.forEach(function(header,i){if(accepted.indexOf(normalize(header))>=0 && row[i]!=='' && row[i]!==null && row[i]!==undefined){
+    var value=id?bridgeId(row[i]):String(row[i]).trim();
+    if(value && values.indexOf(value)<0)values.push(value);
+  }});
+  if(values.length>1)throw Error('Разные значения в колонках '+names.join(' / '));
+  return values[0]||'';
+}
+function bridgeMetadata(h,row) {
+  var fields={campaign_id:['Campaign ID'],adgroup_id:['Ad Group ID','Adgroup ID','Adset ID'],ad_id:['Ad ID'],advertiser_id:['Advertiser ID'],form_id:['Form ID'],placement:['Placement'],campaign_name:['Campaign Name'],adgroup_name:['Ad Group Name','Adgroup Name','Adset Name','AID_NAME'],ad_name:['Ad Name','CID_NAME'],adid_v2:['ADID_V2'],adid_v2_name:['ADID_V2_NAME']};
+  var out={};Object.keys(fields).forEach(function(k){var v=bridgeMetaValue(h,row,fields[k],['campaign_id','adgroup_id','ad_id','advertiser_id','form_id','adid_v2'].indexOf(k)>=0);if(v!=='')out[k]=v;});return out;
+}
 function bridgeTick() {
   var lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
   var start=Date.now(),deadline=start+220000,p=PropertiesService.getScriptProperties();
@@ -97,7 +112,8 @@ function bridgeTick() {
           if(receipt){var poll=bridgeFetch(c,{op:'status',receipts:[receipt]});if(poll.code!==200||!poll.data.results||!poll.data.results[receipt])throw Error('Запись сервера не найдена: проверьте перенос/связку');apply(poll.data.results[receipt]);}
           else {
             var a=bridgeId(val('Lead ID')),b=bridgeId(val('TikTok Lead ID'));if(a&&b&&a!==b)throw Error('Колонки Lead ID расходятся');if(!a&&!b)continue;
-            var body={lead_id:a||b,name:String(val('Name')||'Customer'),phone:bridgePhone(val('Phone')),campaign_id:bridgeId(val('Campaign ID')),ad_id:bridgeId(val('Ad ID')),adgroup_id:bridgeId(val('Ad Group ID')),advertiser_id:bridgeId(val('Advertiser ID')),form_id:bridgeId(val('Form ID'))};
+            var body={lead_id:a||b,name:String(val('Name')||'Customer'),phone:bridgePhone(val('Phone'))};
+            var metadata=bridgeMetadata(h,row);Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
             write('Webhook_Status','PROCESSING');SpreadsheetApp.flush();
             var r=bridgeFetch(c,body);
             if([200,202,409].indexOf(r.code)<0)throw Error(r.data.message||'HTTP '+r.code);

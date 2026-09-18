@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.4.1';
+const BRIDGE_VERSION = '1.5.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -70,6 +70,7 @@ function normalize(array $a): array {
     if(!preg_match('/^[0-9]{1,40}$/D',$r['lead_id']))throw new InvalidArgumentException('Lead ID должен быть строкой цифр');
     if(!preg_match('/^\+[1-9][0-9]{6,14}$/D',$r['phone']))throw new InvalidArgumentException('Телефон нужен в международном формате +...');
     foreach(['campaign_id','ad_id','adgroup_id','advertiser_id','form_id'] as $k){$r[$k]=clean($a[$k]??'',40);if($r[$k]!==''&&!preg_match('/^[0-9]+$/D',$r[$k]))throw new InvalidArgumentException('Некорректный '.$k);}
+    foreach(['placement','campaign_name','adgroup_name','ad_name','adid_v2','adid_v2_name'] as $k){if(isset($a[$k])&&$a[$k]!==''){$value=clean($a[$k],500);if($value!=='')$r[$k]=$value;}}
     return $r;
 }
 function result(array $l): array { $pp=sql('SELECT status,updated FROM partner_status WHERE lead=?',[$l['id']])->fetch();return ['partner_status'=>$pp?$pp['status']:'','partner_status_updated'=>$pp?$pp['updated']:'','status'=>$l['state']==='sent'?'success':(in_array($l['state'],['queued','click_ready','binom_pending','partner_pending'])?'processing':'review'),'stage'=>$l['state'],'lead_id'=>$l['external_id'],'click_id'=>$l['click_id'],'partner_reference_id'=>$l['partner_id'],'message'=>$l['message'],'receipt'=>$l['id']]; }
@@ -127,6 +128,18 @@ function trackerClick(array $t,array $route,array $p,string $base,?callable $htt
     $ok=!$r['error']&&$r['code']===200&&is_string($click)&&preg_match('/^[a-zA-Z0-9_-]{1,200}$/D',$click)&&empty($d['error'])&&empty($d['errors'])&&($d['status']??'')!=='error';
     return ['ok'=>(bool)$ok,'click_id'=>$ok?$click:'','response'=>$r];
 }
+function partnerLeadBody(array $route,array $p,string $base,string $click): array {
+    $body=['offerId'=>$route['offer_id'],'name'=>$p['name'],'phone'=>$p['phone'],'domain'=>parse_url($base,PHP_URL_HOST),'clickid'=>$click,'utm_campaign'=>$p['campaign_id']??'','utm_content'=>$p['ad_id']??'','utm_source'=>'tiktok'];
+    $mode=$route['partner_meta_mode']??'legacy';
+    if($mode!=='legacy'){
+        $body['utm_medium']=$route['buyer'];
+        if($mode==='all'){
+            $extra=[];foreach(tokenLabels() as $field=>$label)if(!in_array($field,['campaign_id','ad_id'],true)&&isset($p[$field])&&$p[$field]!=='')$extra[$field]=$p[$field];
+            if($extra)$body['utm_term']=json_encode($extra,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        }elseif(!empty($p['adgroup_id']))$body['utm_term']=$p['adgroup_id'];
+    }
+    return $body;
+}
 function processLead(string $id,?callable $http=null): void {
     $http??='httpRequest';
     $lock=fopen(home().'/lead-'.$id.'.lock','c');if(!$lock||!flock($lock,LOCK_EX|LOCK_NB))return;
@@ -140,7 +153,7 @@ function processLead(string $id,?callable $http=null): void {
             stage($id,'click_ready',['click_id'=>$click,'message'=>'Клик создан','response'=>'']);$l['click_id']=$click;
         }
         stage($id,'partner_pending',['message'=>'Отправка в ПП']);
-        $body=['offerId'=>$route['offer_id'],'name'=>$p['name'],'phone'=>$p['phone'],'domain'=>parse_url($s['base_url'],PHP_URL_HOST),'clickid'=>$l['click_id'],'utm_campaign'=>$p['campaign_id'],'utm_content'=>$p['ad_id'],'utm_source'=>'tiktok'];
+        $body=partnerLeadBody($route,$p,$s['base_url'],$l['click_id']);
         $r=$http('https://sendmelead.com/api/v3/lead/add',json_encode($body,JSON_THROW_ON_ERROR),['Content-Type: application/json','X-Token: '.$s['partner']['token']]);
         $d=json_decode($r['body'],true,512,JSON_BIGINT_AS_STRING);
         $ok=!$r['error']&&$r['code']>=200&&$r['code']<300&&is_array($d)&&($d['result']??'')==='ok'&&!empty($d['localClickId'])&&is_string($d['localClickId'])&&empty($d['error'])&&empty($d['errors']);
@@ -231,11 +244,11 @@ function csrf(): string {return '<input type="hidden" name="csrf" value="'.h($_S
 function redirect(string $url): never {header('Location: '.$url, true,303);exit;}
 function input(string $name,string $label,string $value='',string $type='text',bool $req=true): void {echo '<label for="field_'.h($name).'">'.h($label).fieldHelp($name,$label).'<input id="field_'.h($name).'" type="'.h($type).'" name="'.h($name).'" value="'.h($value).'" '.($req?'required':'').' autocomplete="'.($type==='password'?'new-password':'off').'"></label>';}
 function options(string $name,string $label,array $values,string $selected='',bool $required=true): void {echo '<label for="field_'.h($name).'">'.h($label).fieldHelp($name,$label).'<select id="field_'.h($name).'" name="'.h($name).'" '.($required?'required':'').'>';foreach($values as $id=>$v)echo '<option value="'.h($id).'" '.((string)$id===$selected?'selected':'').'>'.h(is_array($v)?$v['name']:$v).'</option>';echo '</select></label>';}
-function defaultTokens(): array {return ['campaign_id'=>'campaign_id','adgroup_id'=>'adgroup_id','ad_id'=>'ad_id','lead_id'=>'lead_id','form_id'=>'','advertiser_id'=>''];}
+function defaultTokens(): array {return ['campaign_id'=>'campaign_id','adgroup_id'=>'adgroup_id','ad_id'=>'ad_id','lead_id'=>'lead_id','form_id'=>'','advertiser_id'=>'','placement'=>'','campaign_name'=>'','adgroup_name'=>'','ad_name'=>'','adid_v2'=>'','adid_v2_name'=>''];}
 function buyerLogin(string $owner): string {
     $login=sql('SELECT login FROM users WHERE id=?',[$owner])->fetchColumn();if(!$login)throw new InvalidArgumentException('Владелец не найден');return (string)$login;
 }
-function tokenLabels(): array {return ['campaign_id'=>'Campaign ID — кампания TikTok','adgroup_id'=>'Ad Group ID — группа объявлений','ad_id'=>'Ad ID — объявление','lead_id'=>'Lead ID — лид TikTok','form_id'=>'Form ID — форма','advertiser_id'=>'Advertiser ID — рекламный аккаунт'];}
+function tokenLabels(): array {return ['campaign_id'=>'Campaign ID — кампания TikTok','adgroup_id'=>'Ad Group ID — группа объявлений','ad_id'=>'Ad ID — объявление','lead_id'=>'Lead ID — лид TikTok','form_id'=>'Form ID — форма','advertiser_id'=>'Advertiser ID — рекламный аккаунт','placement'=>'Placement — размещение','campaign_name'=>'Campaign Name — название кампании','adgroup_name'=>'Ad Group Name — название группы','ad_name'=>'Ad Name — название объявления','adid_v2'=>'ADID_V2 — отдельный ID','adid_v2_name'=>'ADID_V2_NAME — отдельное название'];}
 function parseMapping(array $post,string $version): array {
     $params=[];$slots=[];$max=$version==='v1'?10:30;
     foreach(defaultTokens() as $field=>$default){
@@ -250,7 +263,7 @@ function parseMapping(array $post,string $version): array {
     return [$params,$slots];
 }
 function mappingForm(array $v,string $version='v2'): void {
-    echo '<details><summary>Сопоставление меток с Binom</summary><p class="muted">Для каждого поля укажите его строку Token и точное значение колонки Parameter в Traffic Source. Порядок может быть любым. Placeholder и Name копировать не нужно.</p><div class="scroll"><table><tr><th>Данные из таблицы</th><th>Строка в Binom</th><th>Parameter в Binom</th></tr>';
+    echo '<details><summary>Сопоставление меток с Binom</summary><p class="muted">Для каждого поля укажите его строку Token и точное значение колонки Parameter в Traffic Source. Регистр важен: campaign_id и CAMPAIGN_ID — разные параметры. Порядок может быть любым. Placeholder и Name копировать не нужно.</p><div class="scroll"><table><tr><th>Данные из таблицы</th><th>Строка в Binom</th><th>Parameter в Binom</th></tr>';
     foreach(tokenLabels() as $field=>$label){
         echo '<tr><td>'.h($label).'</td><td>'; $choices=[''=>'Номер не указан'];for($i=1;$i<=($version==='v1'?10:30);$i++)$choices[(string)$i]='Token '.$i;
         options('slot_'.$field,'Номер токена',$choices,(string)($v['token_slots'][$field]??''),false);
@@ -261,12 +274,13 @@ function mappingForm(array $v,string $version='v2'): void {
 function mappingChecks(array $route,array $sent,array $received,string $version): array {
     $checks=[];foreach($route['tokens'] as $field=>$param){if($param==='')continue;$slot=$route['token_slots'][$field]??'';
         $canCheck=$version==='v2'&&$slot!=='';$actual=$canCheck?(string)($received['token_'.$slot]??''):'';
-        $checks[$field]=['parameter'=>$param,'token'=>$slot?:'не указан','result'=>$canCheck?($actual===(string)$sent[$field]?'совпадает':'не совпадает'):'проверьте в отчёте Binom','expected'=>$sent[$field]??'','actual'=>$actual];
+        $checks[$field]=['parameter'=>$param,'token'=>$slot?:'не указан','result'=>$canCheck?($actual===(string)($sent[$field]??'')?'совпадает':'не совпадает'):'проверьте в отчёте Binom','expected'=>$sent[$field]??'','actual'=>$actual];
     }return $checks;
 }
 function diagnose(string $id): array {
     $r=uiEntity($id,'route');$t=uiEntity($r['tracker'],'tracker');
     $p=['lead_id'=>'9000000000'.time(),'campaign_id'=>'900000001','adgroup_id'=>'900000002','ad_id'=>'900000003','form_id'=>'900000004','advertiser_id'=>'900000005'];
+    foreach(['placement','campaign_name','adgroup_name','ad_name','adid_v2','adid_v2_name'] as $field)$p[$field]='test_'.$field;
     $test=trackerClick($t,$r,$p,setting('base_url'));$d=json_decode($test['response']['body'],true,512,JSON_BIGINT_AS_STRING);$tokens=[];
     if($t['version']==='v2'){foreach(($d['click_info']??[]) as $k=>$v)if(str_starts_with($k,'token_')&&$v!=='')$tokens[$k]=$v;}
     else {$tokens=is_array($d)?($d['campaign']['tokens']??[]):[];}
@@ -297,7 +311,7 @@ function mutate(): void {
             $v['buyer']=buyerLogin($owner);$v['dedupe_buyer']=$old['dedupe_buyer']??$old['buyer']??$v['buyer'];
             $v['tracker']=required($_POST,'tracker');$v['partner']=required($_POST,'partner');$t=uiEntity($v['tracker'],'tracker');uiEntity($v['partner'],'partner');
             if(ownerOf($v['tracker'])!==$owner||ownerOf($v['partner'])!==$owner)throw new InvalidArgumentException('Связка, трекер и аккаунт ПП должны принадлежать одному пользователю');
-            $v['campaign_key']=required($_POST,'campaign_key');$v['offer_id']=required($_POST,'offer_id');$v['active']=isset($_POST['active']);
+            $v['campaign_key']=required($_POST,'campaign_key');$v['offer_id']=required($_POST,'offer_id');$v['active']=isset($_POST['active']);$v['partner_meta_mode']=clean($_POST['partner_meta_mode']??($old['partner_meta_mode']??'legacy'));if(!in_array($v['partner_meta_mode'],['legacy','ids','all'],true))throw new InvalidArgumentException('Некорректный режим меток ПП');
             $v['secret']=$old['secret']??bin2hex(random_bytes(32));[$v['tokens'],$v['token_slots']]=parseMapping($_POST,$t['version']);
         }
         saveEntity($id,$kind,$v);sql('UPDATE entities SET owner=? WHERE id=?',[$owner,$id]);audit('save_'.$kind,$id);redirect('?page='.$kind.($kind==='route'?'&edit='.$id:''));
@@ -317,8 +331,8 @@ function mutate(): void {
     throw new InvalidArgumentException('Unknown operation');
 }
 function connectionGuide(?array $conf=null): void {
-    $headers="Lead ID\tName\tPhone\tCampaign ID\tAd Group ID\tAd ID\tAdvertiser ID\tForm ID";
-    echo '<h2>Подключение таблицы</h2><h3>1. Создайте таблицу и добавьте шапку</h3><p>Создайте Google-таблицу для этой связки. Скопируйте шапку ниже и вставьте в ячейку A1: названия распределятся по столбцам.</p><pre id="sheet-headers">'.h($headers).'</pre><button type="button" class="secondary" data-copy="sheet-headers">Скопировать шапку</button><p>Обязательные колонки — <code>Lead ID</code> и <code>Phone</code>. <code>Name</code> — имя; остальные колонки — рекламные метки. Порядок столбцов можно менять, названия должны совпадать. Вместо Lead ID поддерживается TikTok Lead ID.</p><p>До поступления лидов выделите столбцы с ID и телефоном и выберите <strong>Формат → Числа → Обычный текст</strong>, чтобы сохранить длинные ID и код страны. Настройте интеграцию TikTok на запись данных в соответствующие колонки. Служебные колонки статусов скрипт добавит сам.</p>';
+    $headers="Lead ID\tName\tPhone\tCampaign ID\tAd Group ID\tAd ID\tAdvertiser ID\tForm ID\tPlacement\tCampaign Name\tAd Group Name\tAd Name\tADID_V2\tADID_V2_NAME";
+    echo '<h2>Подключение таблицы</h2><h3>1. Создайте таблицу и добавьте шапку</h3><p>Создайте Google-таблицу для этой связки. Скопируйте шапку ниже и вставьте в ячейку A1: названия распределятся по столбцам.</p><pre id="sheet-headers">'.h($headers).'</pre><button type="button" class="secondary" data-copy="sheet-headers">Скопировать шапку</button><p>Обязательные колонки — <code>Lead ID</code> и <code>Phone</code>. <code>Name</code> — имя; остальные колонки — рекламные метки. Порядок столбцов можно менять, названия должны совпадать. Вместо Lead ID поддерживается TikTok Lead ID.</p><p>До поступления лидов выделите столбцы с ID и телефоном и выберите <strong>Формат → Числа → Обычный текст</strong>, чтобы сохранить длинные ID и код страны. Настройте интеграцию TikTok на запись данных в соответствующие колонки. Дополнительные метки: Placement, Campaign Name, Ad Group Name, Ad Name, ADID_V2 и ADID_V2_NAME. Последние два поля самостоятельные и не копируются из Ad ID/Ad Name. Скрипт передаёт только полученные значения: добавление пустой колонки не заставит TikTok заполнять её. Служебные колонки статусов скрипт добавит сам.</p>';
     echo '<h3>2. Установите скрипт в Apps Script</h3><div class="actions"><button type="button" data-copy="apps-script">Скопировать скрипт</button><a class="button secondary" data-download href="?page=setup&amp;download=script">Скачать LeadBridge.gs</a></div><textarea id="apps-script" hidden>'.h(base64_decode('__SCRIPT_BASE64__')).'</textarea><p>В таблице откройте <strong>Расширения → Apps Script</strong>. В файле <strong>Код.gs / Code.gs</strong> замените стандартный код скопированным скриптом и сохраните. Если скачали файл, откройте его как текст и вставьте содержимое в редактор. Вернитесь в таблицу и обновите страницу — появится меню <strong>Lead Bridge</strong>.</p>';
     echo '<h3>3. Подключите связку через JSON</h3>';
     if($conf){echo '<pre id="bridge-json">'.h(json_encode($conf,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)).'</pre><button type="button" data-copy="bridge-json">Скопировать JSON</button><p class="muted">JSON содержит секрет отправки этой связки. Передавайте его только тем, кто подключает её таблицу.</p>';}
@@ -441,7 +455,7 @@ function panel(): void {
         else{echo '<div class="card"><h2>'.($edit?'Редактирование':'Новая запись').'</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="save"><input type="hidden" name="kind" value="'.$page.'"><input type="hidden" name="id" value="'.h($edit).'">';input('name','Название',$v['name']??'');if(isAdmin()){if(!$edit)options('owner','Владелец',accountOptions(),currentUser()['id']);else echo '<p class="muted">Владелец: '.h(accountOptions()[ownerOf($edit)]??'').'</p>';}
             if($page==='tracker'){options('version','Версия',['v1'=>'Binom v1','v2'=>'Binom v2'],$v['version']??'v1');input('click_url','Полный Click URL без параметров (например https://tracker.com/click.php)',$v['click_url']??'','url');input('api_key','API key — оставьте пустым, чтобы сохранить текущий','','password',!$edit);echo '<p class="muted">Для v1: используется clickid из ответа Click API; старый параметр binom_click_id в URL оффера также поддерживается. Для v2: обычно используется /click. Ключ для v1: Settings → API; для v2: API_KEY из Settings → Click API. Проверка связки создаёт технический клик без отправки в ПП.</p>';}
             elseif($page==='partner'){echo '<p class="muted">Интеграция Lemonad · sendmelead.com</p>';input('token','Токен аккаунта — пустое поле сохраняет текущий','','password',!$edit);}
-            else{echo '<p class="muted">Buyer ID определяется автоматически по логину владельца'.($edit?': <strong>'.h(buyerLogin(ownerOf($edit))).'</strong>':' после сохранения').'.</p>';options('tracker','Трекер',uiEntities('tracker'),$v['tracker']??'');options('partner','Аккаунт ПП',uiEntities('partner'),$v['partner']??'');echo '<div class="grid">';input('campaign_key','Ключ кампании Binom',$v['campaign_key']??'');input('offer_id','ID оффера Lemonad',$v['offer_id']??'');echo '</div>';mappingForm($v,!empty($v['tracker'])?uiEntity($v['tracker'],'tracker')['version']:'v2');echo '<label><input type="checkbox" name="active" '.(!empty($v['active'])?'checked':'').'>Связка активна'.fieldHelp('active','Связка активна').'</label>';}
+            else{echo '<p class="muted">Buyer ID определяется автоматически по логину владельца'.($edit?': <strong>'.h(buyerLogin(ownerOf($edit))).'</strong>':' после сохранения').'.</p>';options('tracker','Трекер',uiEntities('tracker'),$v['tracker']??'');options('partner','Аккаунт ПП',uiEntities('partner'),$v['partner']??'');echo '<div class="grid">';input('campaign_key','Ключ кампании Binom',$v['campaign_key']??'');input('offer_id','ID оффера Lemonad',$v['offer_id']??'');echo '</div>';options('partner_meta_mode','Метки Lemonad',['legacy'=>'Как раньше: Campaign ID + Ad ID','ids'=>'Основные ID: кампания, объявление, группа и баер','all'=>'Все метки: дополнительные данные JSON в utm_term'],$v['partner_meta_mode']??'legacy');echo '<p class="muted">В ПП: utm_campaign — Campaign ID, utm_content — Ad ID, utm_source — tiktok. Расширенные режимы добавляют логин баера в utm_medium. utm_term содержит Ad Group ID либо JSON с остальными метками. Это одно поле ПП; его отображение и допустимая длина зависят от Lemonad.</p>';mappingForm($v,!empty($v['tracker'])?uiEntity($v['tracker'],'tracker')['version']:'v2');echo '<label><input type="checkbox" name="active" '.(!empty($v['active'])?'checked':'').'>Связка активна'.fieldHelp('active','Связка активна').'</label>';}
             echo '<div class="actions"><button>Сохранить</button><a href="?page='.$page.'">К списку</a></div></form></div>';
             if($page==='partner'&&$edit)postbackGuide($edit);
             if($page==='route'&&$edit){

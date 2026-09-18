@@ -29,3 +29,16 @@ bad(fn()=>parseMapping(array_merge($post,['token_ad_id'=>'']),'v1'),'slot requir
 ob_start();mappingForm($new);$html=ob_get_clean();ok(str_contains($html,'value="2" selected'),'numeric slot remains selected after reload');ok(!str_contains($html,'name="slot_ad_id" required'),'optional slot selection supports legacy configurations');
 ok(sql('PRAGMA integrity_check')->fetchColumn()==='ok','database integrity');
 echo "ALL MAPPING TESTS PASSED\n";
+
+$meta=['placement'=>'TikTok','campaign_name'=>'Campaign & one','adgroup_name'=>'Group + one','ad_name'=>'Creative = one','adid_v2'=>'9000000000000000099','adid_v2_name'=>'Separate creative'];
+$full=normalize(array_merge($input,['campaign_id'=>'123','adgroup_id'=>'456','ad_id'=>'789'],$meta));
+foreach($meta as $key=>$value)ok($full[$key]===$value,'metadata retained '.$key);
+ok(normalize(array_merge($input,array_fill_keys(array_keys($meta),'')))===normalize($input),'empty optional fields preserve legacy fingerprints');
+$mapped=$m;$mapped['tokens']=array_merge(defaultTokens(),['campaign_id'=>'CAMPAIGN_ID','placement'=>'PLACEMENT','campaign_name'=>'CAMPAIGN_NAME','adgroup_name'=>'AID_NAME','ad_name'=>'CID_NAME','adid_v2'=>'ADID_V2','adid_v2_name'=>'ADID_V2_NAME']);
+foreach(['v1','v2'] as $version){$t=entity('t','tracker');$t['version']=$version;trackerClick($t,$mapped,$full,'https://bridge.example.com',function($url,$body,$headers)use($full,$mapped){parse_str(parse_url($url,PHP_URL_QUERY),$q);foreach($mapped['tokens'] as $field=>$parameter)if($parameter!=='')ok($q[$parameter]===($full[$field]??''),'exact-case encoded token '.$parameter);ok(!isset($q['campaign_id']),'lowercase campaign parameter not substituted');return ['code'=>200,'error'=>'','body'=>'{}'];});}
+$mapped['partner_meta_mode']='all';$body=partnerLeadBody($mapped,$full,'https://bridge.example.com','test-click');$extra=json_decode($body['utm_term'],true,512,JSON_THROW_ON_ERROR);
+foreach($meta as $key=>$value)ok($extra[$key]===$value,'Lemonad metadata JSON '.$key);
+ok($body['utm_campaign']==='123'&&$body['utm_content']==='789'&&$body['utm_medium']==='buyer.a-01'&&$extra['adgroup_id']==='456','Lemonad IDs and buyer stable');
+ok(!isset($extra['phone'])&&!isset($extra['name']),'no contact data in metadata');
+$mapped['partner_meta_mode']='ids';ok(partnerLeadBody($mapped,$full,'https://bridge.example.com','test')['utm_term']==='456','ID-only mode');
+unset($mapped['partner_meta_mode']);ok(!isset(partnerLeadBody($mapped,$full,'https://bridge.example.com','test')['utm_term']),'legacy snapshot PP body unchanged');

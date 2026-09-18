@@ -15,7 +15,8 @@ with tempfile.TemporaryDirectory() as tmp:
     # Isolate the path/ownership checks for an unprivileged test runner.
     source = source.replace('control=/var/lib/lead-bridge-control', f'control={control}')
     source = source.replace('/var /var/lib "$control" /var/www /var/www/lead-bridge', '"$control"')
-    source = source.replace('== 0 ]]', f'== {os.getuid()} ]]')
+    for name in ['dir', 'path']:
+        source = source.replace(f'$(stat -c %u "${name}") == 0', f'$(stat -c %u "${name}") == {os.getuid()}')
     # A regression must not reach any real deployment commands.
     source = source.replace('stage=$(mktemp', 'exit 99\nstage=$(mktemp')
     script.write_text(source)

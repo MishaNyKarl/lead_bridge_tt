@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.6.0';
+const BRIDGE_VERSION = '1.6.1';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -294,7 +294,7 @@ function mutate(): void {
         db()->exec('BEGIN IMMEDIATE');try{accountMutation($op);db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return;
     }
     if(accountMutation($op))return;
-    if($op==='logout'){session_destroy();redirect('?');}
+    if($op==='logout'){endPanelSession();redirect('?');}
     if($op==='diagnose'){diagnose(required($_POST,'id'));return;}
     if($op==='save'){
         $kind=required($_POST,'kind');if(!in_array($kind,['tracker','partner','route'],true))throw new InvalidArgumentException('Invalid type');
@@ -384,7 +384,7 @@ function buyerManual(): void {
 HTML;
 }
 function panel(): void {
-    ini_set('session.use_strict_mode','1');session_name('leadbridge');session_set_cookie_params(['secure'=>true,'httponly'=>true,'samesite'=>'Strict','path'=>'/']);session_start();$_SESSION['csrf']??=bin2hex(random_bytes(24));
+    startPanelSession();$_SESSION['csrf']??=bin2hex(random_bytes(24));
     migrateAccounts();$error='';$notice='';$auth=currentUser()!==null;
     if($_SERVER['REQUEST_METHOD']==='POST'){
         try {if(!hash_equals($_SESSION['csrf'],(string)($_POST['csrf']??'')))throw new InvalidArgumentException('Сессия формы истекла. Обновите страницу');
@@ -393,12 +393,12 @@ function panel(): void {
                 $login=strtolower(clean($_POST['login']??'',50));$user=sql('SELECT * FROM users WHERE login=?',[$login])->fetch();
                 $passwordOk=password_verify((string)($_POST['password']??''),$user['password']??'$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.');
                 if(!$user||!$user['active']||!$passwordOk){$n=($attempt&&$attempt['until_at']>time())?$attempt['n']+1:1;sql('INSERT OR REPLACE INTO attempts VALUES(?,?,?)',[$ip,$n,time()+900]);throw new InvalidArgumentException('Неверный логин или пароль');}
-                sql('DELETE FROM attempts WHERE ip=?',[$ip]);session_regenerate_id(true);$_SESSION['uid']=$user['id'];$_SESSION['last']=time();$_SESSION['epoch']=$user['epoch'];$_SESSION['csrf']=bin2hex(random_bytes(24));audit('login');redirect('?');
+                sql('DELETE FROM attempts WHERE ip=?',[$ip]);session_regenerate_id(true);$_SESSION['uid']=$user['id'];refreshPanelSession();$_SESSION['epoch']=$user['epoch'];$_SESSION['csrf']=bin2hex(random_bytes(24));audit('login');redirect('?');
             }
             if(!$auth)throw new InvalidArgumentException('Войдите в панель');mutate();$notice='Сохранено';
         }catch(InvalidArgumentException $e){$error=$e->getMessage();}catch(Throwable $e){$error='Не удалось выполнить действие';error_log('Bridge panel: '.get_class($e));}
     }
-    if($auth)$_SESSION['last']=time();
+    if($auth)refreshPanelSession();
     $page=$_GET['page']??'overview';$titles=['overview'=>'Обзор','route'=>'Связки','tracker'=>'Трекеры','partner'=>'Партнёрки','leads'=>'Журнал лидов','setup'=>'Подключение','settings'=>'Настройки'];
     if($auth&&isAdmin())$titles['users']='Аккаунты';
     if($auth&&$page==='users'&&!isAdmin()){http_response_code(403);echo 'Доступ запрещён';return;}
@@ -544,4 +544,3 @@ function main(): void {
     if(!in_array($_SERVER['REQUEST_METHOD'],['GET','POST'])){http_response_code(405);return;}panel();
 }
 if(!defined('BRIDGE_TEST'))main();
-

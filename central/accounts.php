@@ -1,5 +1,27 @@
 <?php
 // Included in the single-file distribution by build.py.
+const BRIDGE_SESSION_TTL = 30 * 86400;
+function startPanelSession(): void {
+    // Keep application sessions out of PHP's shared directory and OS cleanup policy.
+    $dir=home().'/sessions';
+    if(!is_dir($dir)&&!mkdir($dir,0700)&&!is_dir($dir))throw new RuntimeException('Cannot create session storage');
+    ini_set('session.save_handler','files');session_save_path($dir);
+    ini_set('session.use_strict_mode','1');ini_set('session.use_only_cookies','1');
+    ini_set('session.gc_maxlifetime',(string)BRIDGE_SESSION_TTL);
+    ini_set('session.gc_probability','1');ini_set('session.gc_divisor','100');
+    session_name('leadbridge');
+    session_set_cookie_params(['lifetime'=>BRIDGE_SESSION_TTL,'secure'=>true,'httponly'=>true,'samesite'=>'Strict','path'=>'/']);
+    if(!session_start())throw new RuntimeException('Cannot start session');
+}
+function panelSessionCookie(int $expires): void {
+    setcookie(session_name(),session_id(),['expires'=>$expires,'secure'=>true,'httponly'=>true,'samesite'=>'Strict','path'=>'/']);
+}
+function refreshPanelSession(): void {
+    $_SESSION['last']=time();panelSessionCookie(time()+BRIDGE_SESSION_TTL);
+}
+function endPanelSession(): void {
+    panelSessionCookie(time()-3600);$_SESSION=[];session_destroy();
+}
 function migrateAccounts(): void {
     if(setting('accounts_migrated')==='1')return;
     db()->exec('BEGIN IMMEDIATE');
@@ -13,7 +35,7 @@ function migrateAccounts(): void {
     }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
 }
 function currentUser(): ?array {
-    if(empty($_SESSION['uid'])||time()-($_SESSION['last']??0)>=28800)return null;
+    if(empty($_SESSION['uid'])||time()-($_SESSION['last']??0)>=BRIDGE_SESSION_TTL)return null;
     $u=sql('SELECT * FROM users WHERE id=?',[$_SESSION['uid']])->fetch();
     return $u&&$u['active']&&hash_equals($u['epoch'],(string)($_SESSION['epoch']??''))?$u:null;
 }

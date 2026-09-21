@@ -25,13 +25,14 @@ base=f'http://127.0.0.1:{port}/action.php'
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args):return None
 class Client:
- def __init__(self):self.cookie='';self.csrf='';self.opener=urllib.request.build_opener(NoRedirect)
+ def __init__(self):self.cookie='';self.csrf='';self.cookies=[];self.opener=urllib.request.build_opener(NoRedirect)
  def req(self,path='',data=None,headers=None):
   hd={'Cookie':self.cookie};hd.update(headers or {})
   if isinstance(data,dict):data=urllib.parse.urlencode(data).encode();hd['Content-Type']='application/x-www-form-urlencoded'
   request=urllib.request.Request(base+path,data=data,headers=hd)
   try:r=self.opener.open(request,timeout=10)
   except urllib.error.HTTPError as e:r=e
+  self.cookies.extend(r.headers.get_all('Set-Cookie') or [])
   if r.headers.get('Set-Cookie'):self.cookie=r.headers['Set-Cookie'].split(';')[0]
   text=r.read().decode();token=re.search(r'name="csrf" value="([^"]+)"',text)
   if token:self.csrf=token.group(1)
@@ -50,6 +51,33 @@ try:
  assert_ok('Аккаунты' in admin.login('admin','admin-test-password-123')[1],'admin migrated login')
  assert_ok('Вход в панель' not in a.login('buyer-a','buyer-password-123')[1],'buyer login')
  b.login('buyer-b','buyer-password-123')
+ # Persistent session cookie and private storage survive inactivity and server restart.
+ assert_ok(any('Max-Age=2592000' in v and 'secure' in v.lower() and 'httponly' in v.lower() and 'SameSite=Strict' in v for v in a.cookies),'persistent secure cookie has 30-day lifetime')
+ saved_cookie=a.cookie
+ session_file=work/'sessions'/('sess_'+saved_cookie.split('=',1)[1])
+ assert_ok(session_file.exists() and (session_file.parent.stat().st_mode & 0o777)==0o700,'sessions use private application directory')
+ def age_session(days):
+  stamp=int(time.time())-days*86400
+  session_file.write_text(re.sub(r'last\|i:\d+;',f'last|i:{stamp};',session_file.read_text()))
+  os.utime(session_file,(stamp,stamp))
+ age_session(2)
+ server.terminate();server.wait(timeout=10)
+ server=subprocess.Popen(['php','-S',f'127.0.0.1:{port}','-t',str(root)],env=env,stdout=log,stderr=log)
+ for i in range(30):
+  try:Client().req('?health=1');break
+  except urllib.error.URLError:time.sleep(.1)
+ reopened=Client();reopened.cookie=saved_cookie
+ assert_ok('Вход в панель' not in reopened.req()[1],'saved cookie survives two days and server restart')
+ assert_ok(int(re.search(r'last\|i:(\d+);',session_file.read_text()).group(1))>=int(time.time())-5,'activity renews server session')
+ assert_ok(any('Max-Age=2592000' in v for v in reopened.cookies),'activity renews browser cookie')
+ age_session(31)
+ assert_ok('Вход в панель' in reopened.req()[1],'30-day idle limit enforced')
+ a.login('buyer-a','buyer-password-123')
+ logout=Client();logout.login('buyer-a','buyer-password-123');old_cookie=logout.cookie
+ logout.post(op='logout')
+ assert_ok(any('Max-Age=0' in v for v in logout.cookies),'logout expires browser cookie')
+ replay=Client();replay.cookie=old_cookie
+ assert_ok('Вход в панель' in replay.req()[1],'logged-out cookie cannot be reused')
  for kind in ['tracker','partner','route']:
   page=a.req('?page='+kind)[1]
   assert_ok(kind.upper()+'_a' in page and kind.upper()+'_b' not in page,kind+' list scoped')

@@ -421,10 +421,10 @@ function panel(): void {
     @keyframes button-wave{from{opacity:.55;transform:scale(1)}to{opacity:0;transform:scale(1.12,1.5)}}
     @media(prefers-reduced-motion:reduce){[data-copy],[data-download]{transition:none}[data-copy]:active,[data-download]:active{transform:none}.button-wave::before,.button-wave::after{animation:none;display:none}}
 
-    .script-update-notice{position:fixed;z-index:65;right:24px;top:24px;width:400px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 48px);overflow:auto;padding:24px;background:linear-gradient(145deg,#edf5ff 0%,#fff 58%);border:1px solid #b8d0fc;border-radius:20px;box-shadow:0 18px 60px #193b7630,0 0 0 4px #ffffffaa;animation:notice-enter .3s ease-out}
+    .script-update-notice{position:fixed;z-index:65;right:24px;top:24px;width:400px;max-width:calc(100% - 48px);max-height:calc(100dvh - 48px);overflow:auto;padding:24px;background:linear-gradient(145deg,#edf5ff 0%,#fff 58%);border:1px solid #b8d0fc;border-radius:20px;box-shadow:0 18px 60px #193b7630,0 0 0 4px #ffffffaa;animation:notice-enter .3s ease-out}
     .script-update-heading{display:flex;align-items:center;gap:12px}.script-update-icon{display:grid;place-items:center;width:40px;height:40px;flex-shrink:0;border-radius:13px;background:#2862de;color:#fff;font-size:28px;box-shadow:0 4px 14px #2862de30}.script-update-eyebrow{font-size:10px;letter-spacing:1.2px;font-weight:750;color:#315f9c}.script-update-notice h2{font-size:21px;margin:18px 0 10px}.script-update-notice p{margin:0 0 12px}.script-update-detail{font-size:13px;color:#526682}.script-update-notice .actions{margin-top:18px;gap:8px}.script-update-notice .button,.script-update-notice button{font-size:13px;padding:10px 13px}.script-update-notice :focus-visible{outline:3px solid #6898f2;outline-offset:3px}
     @keyframes notice-enter{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
-    @media(max-width:560px){.script-update-notice{right:16px;top:16px;padding:20px;max-height:calc(100dvh - 32px)}}
+    @media(max-width:560px){.script-update-notice{right:16px;top:16px;padding:20px;max-width:calc(100% - 32px);max-height:calc(100dvh - 32px)}}
     @media(prefers-reduced-motion:reduce){.script-update-notice{animation:none}}
     .help-fab{position:fixed;right:24px;bottom:24px;z-index:50;width:52px;height:52px;padding:0;border-radius:50%;font-size:25px;box-shadow:0 5px 22px #15223a30}
     .help-fab:hover{background:#174cc3}.help-fab:focus-visible{outline:3px solid #91b5ff;outline-offset:4px}

@@ -74,3 +74,21 @@ function leadOrder(array $routes): string {
     }
     return $key.' COLLATE NOCASE '.$direction.',id DESC';
 }
+
+function scriptNoticeControls(): void {
+    requireAdmin();$notice=json_decode(setting('script_notice'),true)?:[];$id=(string)($notice['id']??'');
+    echo '<div class="card"><h2>Обновление Apps Script</h2><p>Опубликуйте уведомление, когда баерам нужно заменить скрипт во всех действующих Google-таблицах. Оно появится справа сверху при входе или переходе на другую страницу и останется до нажатия «Понятно». Повторная публикация покажет его всем заново.</p>';
+    echo '<p class="muted">'.(!empty($notice['active'])?'Уведомление опубликовано: '.h(displayDate($notice['created'])):'Сейчас уведомление выключено.').'</p><div class="actions"><form method="post">'.csrf().'<input type="hidden" name="op" value="script_notice_publish"><input type="hidden" name="notice_id" value="'.h($id).'"><button>Уведомить об обновлении Apps Script</button></form><a class="button secondary" href="?page=settings&amp;preview_script_notice=1">Предпросмотр</a>';
+    if(!empty($notice['active']))echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="script_notice_withdraw"><input type="hidden" name="notice_id" value="'.h($id).'"><button class="secondary">Снять уведомление</button></form>';
+    echo '</div></div>';
+}
+function scriptNotice(): void {
+    $me=currentUser();if(!$me)return;
+    $preview=isAdmin()&&($_GET['preview_script_notice']??'')==='1';
+    $notice=json_decode(setting('script_notice'),true)?:[];$id=(string)($notice['id']??'');
+    if(!$preview&&(empty($notice['active'])||$id===''||setting('script_notice_ack_'.$me['id'])===$id))return;
+    echo '<section id="script-update-notice" class="script-update-notice" role="region" aria-labelledby="script-update-title"><div class="script-update-heading"><span class="script-update-icon" aria-hidden="true">↻</span><span class="script-update-eyebrow">'.($preview?'ПРЕДПРОСМОТР · ВИДНО ТОЛЬКО ВАМ':'ОБНОВЛЕНИЕ ПЛАТФОРМЫ').'</span></div><h2 id="script-update-title">Обновился Apps Script</h2><p>Замените Apps Script во <strong>всех действующих Google-таблицах</strong>, подключённых к вашим связкам.</p><p class="script-update-detail">Один скрипт на таблицу — даже если в ней несколько листов. Сохраните JSON и триггер, затем выполните «Подготовить и проверить» на каждом подключённом листе.</p><div class="actions"><a class="button" href="?page=setup">Открыть новый скрипт</a>';
+    if($preview)echo '<a class="button secondary" href="?page=settings">Закрыть просмотр</a>';
+    else echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="script_notice_ack"><input type="hidden" name="notice_id" value="'.h($id).'"><button class="secondary">Понятно</button></form>';
+    echo '</div></section>';
+}

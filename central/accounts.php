@@ -75,6 +75,21 @@ function assignRoute(string $routeId,string $owner): void {
 }
 function accountMutation(string $op): bool {
     $me=requireUser();
+    if(in_array($op,['script_notice_publish','script_notice_withdraw','script_notice_ack'],true)){
+        if($op!=='script_notice_ack')requireAdmin();
+        $notice=json_decode(setting('script_notice'),true)?:[];
+        $id=(string)($notice['id']??'');
+        if(!hash_equals($id,(string)($_POST['notice_id']??'')))throw new InvalidArgumentException('Уведомление уже изменилось. Обновите страницу.');
+        if($op==='script_notice_publish'){
+            $notice=['id'=>bin2hex(random_bytes(16)),'created'=>gmdate('c'),'active'=>true];
+            setting('script_notice',json_encode($notice,JSON_THROW_ON_ERROR));audit('script_notice_published',$notice['id']);
+        }elseif($op==='script_notice_withdraw'){
+            $notice['active']=false;setting('script_notice',json_encode($notice,JSON_THROW_ON_ERROR));audit('script_notice_withdrawn',$id);
+        }elseif($id!==''&&!empty($notice['active'])){
+            setting('script_notice_ack_'.$me['id'],$id);
+        }
+        return true;
+    }
     if($op==='timezone'){
         $zone=(string)($_POST['timezone']??'');
         if(!in_array($zone,['Europe/Moscow','UTC'],true))throw new InvalidArgumentException('Выберите Europe/Moscow или UTC');

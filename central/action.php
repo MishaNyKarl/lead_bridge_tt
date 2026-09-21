@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.6.1';
+const BRIDGE_VERSION = '1.6.2';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -290,7 +290,7 @@ function diagnose(string $id): array {
 }
 function mutate(): void {
     $me=requireUser();$op=$_POST['op']??'';
-    if($op==='user_save'){
+    if(in_array($op,['user_save','script_notice_publish','script_notice_withdraw','script_notice_ack'],true)){
         db()->exec('BEGIN IMMEDIATE');try{accountMutation($op);db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return;
     }
     if(accountMutation($op))return;
@@ -421,6 +421,11 @@ function panel(): void {
     @keyframes button-wave{from{opacity:.55;transform:scale(1)}to{opacity:0;transform:scale(1.12,1.5)}}
     @media(prefers-reduced-motion:reduce){[data-copy],[data-download]{transition:none}[data-copy]:active,[data-download]:active{transform:none}.button-wave::before,.button-wave::after{animation:none;display:none}}
 
+    .script-update-notice{position:fixed;z-index:65;right:24px;top:24px;width:400px;max-width:calc(100vw - 32px);max-height:calc(100dvh - 48px);overflow:auto;padding:24px;background:linear-gradient(145deg,#edf5ff 0%,#fff 58%);border:1px solid #b8d0fc;border-radius:20px;box-shadow:0 18px 60px #193b7630,0 0 0 4px #ffffffaa;animation:notice-enter .3s ease-out}
+    .script-update-heading{display:flex;align-items:center;gap:12px}.script-update-icon{display:grid;place-items:center;width:40px;height:40px;flex-shrink:0;border-radius:13px;background:#2862de;color:#fff;font-size:28px;box-shadow:0 4px 14px #2862de30}.script-update-eyebrow{font-size:10px;letter-spacing:1.2px;font-weight:750;color:#315f9c}.script-update-notice h2{font-size:21px;margin:18px 0 10px}.script-update-notice p{margin:0 0 12px}.script-update-detail{font-size:13px;color:#526682}.script-update-notice .actions{margin-top:18px;gap:8px}.script-update-notice .button,.script-update-notice button{font-size:13px;padding:10px 13px}.script-update-notice :focus-visible{outline:3px solid #6898f2;outline-offset:3px}
+    @keyframes notice-enter{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+    @media(max-width:560px){.script-update-notice{right:16px;top:16px;padding:20px;max-height:calc(100dvh - 32px)}}
+    @media(prefers-reduced-motion:reduce){.script-update-notice{animation:none}}
     .help-fab{position:fixed;right:24px;bottom:24px;z-index:50;width:52px;height:52px;padding:0;border-radius:50%;font-size:25px;box-shadow:0 5px 22px #15223a30}
     .help-fab:hover{background:#174cc3}.help-fab:focus-visible{outline:3px solid #91b5ff;outline-offset:4px}
     #buyer-help{width:min(860px,calc(100vw - 32px));max-height:86vh;max-height:86dvh;padding:0;border:1px solid #dce4ee;border-radius:18px;color:#15223a;box-shadow:0 20px 90px #0c1e3f40}
@@ -484,12 +489,13 @@ function panel(): void {
     }elseif($page==='setup'){echo '<div class="card">';connectionGuide();echo '</div><div class="card"><h2>Как читать статусы</h2><p>QUEUED — сохранено на сервере; SENT — ПП подтвердила приём; REVIEW — нужна проверка; RETRY — повторно сверить заявку с тем же Lead ID. После разрыва соединения повтор с тем же ID не создаёт новую заявку.</p><p>Обязательные колонки: Lead ID (или TikTok Lead ID), Phone. Метки: Campaign ID, Ad ID, Ad Group ID, Advertiser ID, Form ID. ID и телефон должны поступать текстом.</p><p>При сортировке таблицы выполните «Пересканировать строки». Скрипт работает с добавлением строк; старые SENT не отправляются повторно.</p></div>';}
     elseif($page==='users'){accountsPage();}
     elseif($page==='settings'){
+        if(isAdmin())scriptNoticeControls();
         echo '<div class="card"><h2>Часовой пояс</h2><p class="muted">Время в журнале лидов и последних действиях отображается в выбранном часовом поясе. Настройка действует только для вашего аккаунта.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="timezone">';options('timezone','Часовой пояс',['Europe/Moscow'=>'Europe/Moscow (Москва, UTC+3)','UTC'=>'UTC (UTC+0)'],userTimezone());echo '<button>Сохранить часовой пояс</button></form></div>';
 
         echo '<div class="card"><h2>Мой пароль</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="password">';input('current_password','Текущий пароль','','password');input('password','Новый пароль, 14–72 символа','','password');echo '<button>Изменить пароль</button></form></div>';
         if(isAdmin()){echo '<div class="card"><h2>Установка</h2><p>Адрес: '.h(setting('base_url')).'</p><p class="muted">Резервные копии хранятся вне сайта. Для переноса нужны база и ключ шифрования.</p></div><div class="card scroll"><h2>Последние действия</h2><table>';foreach(sql('SELECT audit.*,coalesce(users.login,audit.actor) AS actor_login FROM audit LEFT JOIN users ON users.id=audit.actor ORDER BY audit.id DESC LIMIT 30') as $a)echo '<tr><td>'.h(displayDate($a['created'])).'</td><td>'.h($a['actor_login']).'</td><td>'.h($a['event']).'</td><td>'.h($a['subject']).'</td></tr>';echo '</table></div>';}
     }
-    ?></main><div id="field-tooltip" role="tooltip" hidden></div><?php buyerManual();?><script nonce="<?=h($GLOBALS['bridge_nonce'])?>">
+    ?></main><div id="field-tooltip" role="tooltip" hidden></div><?php buyerManual();scriptNotice();?><script nonce="<?=h($GLOBALS['bridge_nonce'])?>">
     var tip=document.getElementById('field-tooltip'),tipOwner=null,tipTimer;
     function closeTip(){clearTimeout(tipTimer);tip.hidden=true;if(tipOwner)tipOwner.removeAttribute('aria-describedby');tipOwner=null;}
     function showTip(button){clearTimeout(tipTimer);if(tipOwner&&tipOwner!==button)tipOwner.removeAttribute('aria-describedby');tipOwner=button;tip.textContent=button.dataset.tip;tip.hidden=false;button.setAttribute('aria-describedby','field-tooltip');var r=button.getBoundingClientRect(),w=tip.offsetWidth,h=tip.offsetHeight;tip.style.left=Math.max(12,Math.min(r.left,innerWidth-w-12))+'px';tip.style.top=Math.max(12,r.bottom+h+10<innerHeight?r.bottom+8:r.top-h-8)+'px';}

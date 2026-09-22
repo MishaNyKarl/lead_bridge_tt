@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.10.0';
+const BRIDGE_VERSION = '1.11.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -22,6 +22,11 @@ function db(): PDO {
       CREATE TABLE IF NOT EXISTS partner_status (lead TEXT PRIMARY KEY,status TEXT NOT NULL,partner_lead_id TEXT NOT NULL,updated TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS partner_events (id INTEGER PRIMARY KEY,lead TEXT NOT NULL,status TEXT NOT NULL,received TEXT NOT NULL,applied INTEGER NOT NULL);
 
+      CREATE TABLE IF NOT EXISTS partner_poll (lead TEXT PRIMARY KEY,next_at INTEGER NOT NULL DEFAULT 0,partner TEXT NOT NULL DEFAULT "",checked INTEGER NOT NULL DEFAULT 0,last_ok INTEGER NOT NULL DEFAULT 0,failures INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT "");
+      CREATE INDEX IF NOT EXISTS partner_poll_due ON partner_poll(next_at,lead);
+      CREATE INDEX IF NOT EXISTS partner_poll_partner ON partner_poll(partner);
+      CREATE INDEX IF NOT EXISTS partner_events_lead ON partner_events(lead,id);
+      CREATE TRIGGER IF NOT EXISTS partner_poll_sent AFTER UPDATE OF state ON leads WHEN NEW.state="sent" AND OLD.state<>"sent" BEGIN INSERT INTO partner_poll(lead,next_at) VALUES(NEW.id,0) ON CONFLICT(lead) DO UPDATE SET next_at=0; END;
       CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,created TEXT NOT NULL,event TEXT NOT NULL,subject TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY,login TEXT UNIQUE NOT NULL,name TEXT NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL,active INTEGER NOT NULL,epoch TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attempts (ip TEXT PRIMARY KEY,n INTEGER NOT NULL,until_at INTEGER NOT NULL)');
@@ -48,6 +53,7 @@ function saveEntity(string $id,string $kind,array $a): void { sql('INSERT INTO e
 function audit(string $event,string $id=''): void { sql('INSERT INTO audit(created,event,subject,actor) VALUES(?,?,?,?)',[gmdate('c'),$event,$id,$_SESSION['uid']??'system']); }
 require_once __DIR__.'/accounts.php'; // __ACCOUNTS_MODULE__
 require_once __DIR__.'/ui.php'; // __UI_MODULE__
+require_once __DIR__.'/partner_poll.php'; // __POLL_MODULE__
 function clean(mixed $v,int $max=250): string { if (!is_string($v)||strlen($v)>$max||preg_match('/[\x00-\x1F\x7F]/',$v)) throw new InvalidArgumentException('Некорректное текстовое поле'); return trim($v); }
 function required(array $a,string $k,int $max=250): string { $v=clean($a[$k]??'',$max); if($v==='') throw new InvalidArgumentException('Заполните поле: '.$k); return $v; }
 function publicUrl(string $url): string {
@@ -196,7 +202,7 @@ function partnerRequest(array $partner,array $route,array $p,string $base,string
     if(($partner['type']??'lemonad')==='lemonad')return [$url,json_encode(partnerLeadBody($route,$p,$base,$click),JSON_THROW_ON_ERROR),['Content-Type: application/json','X-Token: '.$partner['token']]];
     $body=['offer'=>$route['offer_id'],'ip'=>$p['ip'],'name'=>$p['name'],'phone'=>ltrim($p['phone'],'+'),'subid'=>$click,'uuid'=>$p['lead_id'],'utm_source'=>'tiktok','utm_campaign'=>$p['campaign_id']??'','utm_content'=>$p['ad_id']??'','utm_term'=>$p['adgroup_id']??'','utm_medium'=>$route['buyer']];
     if(partnerAccountType($partner)==='agency'){
-        $body['extu']=hash('sha256',json_encode([$route['dedupe_buyer']??$route['buyer'],$p['lead_id']],JSON_THROW_ON_ERROR));
+        $body['extu']=agencyExternalId($route,$p['lead_id']);
         $body['exts']=$route['buyer'];
     }else $body['flow']=$route['flow_id'];
     foreach(['country','currency'] as $field)if(!empty($route[$field]))$body[$field]=$route[$field];
@@ -237,7 +243,7 @@ function worker(bool $once=false): void {
     $lock=fopen(home().'/worker.lock','c');if(!flock($lock,LOCK_EX|LOCK_NB))throw new RuntimeException('Worker already running');
     // A previous process may have died after the remote service accepted its request.
     sql("UPDATE leads SET state=CASE WHEN state='partner_pending' THEN 'partner_review' ELSE 'binom_review' END,message='Процесс прервался. Сверьте результат перед повтором',updated=? WHERE state IN ('binom_pending','partner_pending')",[gmdate('c')]);
-    do {setting('worker_heartbeat',(string)time());$ids=sql("SELECT id FROM leads WHERE state IN ('queued','click_ready') ORDER BY created LIMIT 20")->fetchAll(PDO::FETCH_COLUMN);foreach($ids as $id){if(is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause'))break;$dispatch=fopen((getenv('BRIDGE_CONTROL')?:home()).'/dispatch.lock',getenv('BRIDGE_CONTROL')?'r':'c');if(!$dispatch||!flock($dispatch,LOCK_EX))throw new RuntimeException('Cannot acquire dispatch lock');try{if(!is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause'))processLead($id);}finally{flock($dispatch,LOCK_UN);fclose($dispatch);}setting('worker_heartbeat',(string)time());}if(!$once)sleep(2);}while(!$once);
+    do {setting('worker_heartbeat',(string)time());$ids=sql("SELECT id FROM leads WHERE state IN ('queued','click_ready') ORDER BY created LIMIT 20")->fetchAll(PDO::FETCH_COLUMN);foreach($ids as $id){if(is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause'))break;$dispatch=fopen((getenv('BRIDGE_CONTROL')?:home()).'/dispatch.lock',getenv('BRIDGE_CONTROL')?'r':'c');if(!$dispatch||!flock($dispatch,LOCK_EX))throw new RuntimeException('Cannot acquire dispatch lock');try{if(!is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause'))processLead($id);}finally{flock($dispatch,LOCK_UN);fclose($dispatch);}setting('worker_heartbeat',(string)time());}if(!is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause')&&time()-(int)setting('partner_poll_tick')>=10){$dispatch=fopen((getenv('BRIDGE_CONTROL')?:home()).'/dispatch.lock',getenv('BRIDGE_CONTROL')?'r':'c');if(!$dispatch||!flock($dispatch,LOCK_EX))throw new RuntimeException('Cannot acquire dispatch lock');try{if(!is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause')){setting('partner_poll_tick',(string)time());pollAgencyStatuses();}}catch(Throwable $e){error_log('Bridge status polling: '.get_class($e));}finally{flock($dispatch,LOCK_UN);fclose($dispatch);}setting('worker_heartbeat',(string)time());}if(!$once)sleep(2);}while(!$once);
 }
 function postbackKey(string $rid,array $route): string {
     return hash_hmac('sha256','lemonad-postback|'.$rid.'|'.$route['secret'],file_get_contents(home().'/master.key'));
@@ -276,14 +282,7 @@ function receivePostback(array $a): array {
             }
         }else{$leads=sql('SELECT id FROM leads WHERE route=? AND click_id=?',[$rid,$click])->fetchAll(PDO::FETCH_COLUMN);}
         if(count($leads)!==1){db()->exec('COMMIT');return ['status'=>'ignored','message'=>'No unique matching lead'];}
-        $id=$leads[0];$old=sql('SELECT * FROM partner_status WHERE lead=?',[$id])->fetch();
-        if($old&&$old['partner_lead_id']!==''&&$partnerLead!==''&&$old['partner_lead_id']!==$partnerLead)throw new InvalidArgumentException('Partner lead ID mismatch',409);
-        if($old&&$old['status']===$status){db()->exec('COMMIT');return ['status'=>'ok','duplicate'=>true];}
-        // A delayed initial event must not undo a decision; payment is terminal.
-        $apply=!$old||($status!=='new'&&$old['status']!=='paid'&&($status!=='hold'||$old['status']==='new'));$now=gmdate('c');
-        sql('INSERT INTO partner_events(lead,status,received,applied) VALUES(?,?,?,?)',[$id,$status,$now,(int)$apply]);
-        if($apply)sql('INSERT INTO partner_status VALUES(?,?,?,?) ON CONFLICT(lead) DO UPDATE SET status=excluded.status,partner_lead_id=excluded.partner_lead_id,updated=excluded.updated',[$id,$status,$partnerLead?:($old['partner_lead_id']??''),$now]);
-        db()->exec('COMMIT');return ['status'=>'ok','applied'=>$apply];
+        $out=applyPartnerStatus($leads[0],$status,$partnerLead);db()->exec('COMMIT');return $out;
     }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
 }
 function postback(): never {
@@ -299,6 +298,7 @@ function partnerPostbackUrl(string $pid,string $provider): string {
     return setting('base_url').'/action.php?postback='.$provider.'&partner='.rawurlencode($pid).'&key='.partnerPostbackKey($pid).$tail;
 }
 function postbackGuide(string $pid): void {
+    if(partnerAccountType(entity($pid,'partner'))==='agency'){agencyPollGuide($pid);return;}
     $provider=setting('postback_provider_'.$pid)?:(entity($pid,'partner')['type']??'lemonad');if(!isset(postbackProviders()[$provider]))$provider='lemonad';
     $url=partnerPostbackUrl($pid,$provider);
     echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="postback_provider"><input type="hidden" name="id" value="'.h($pid).'"><label for="postback-provider">Партнёрка для обратного постбэка<select id="postback-provider" name="postback_provider" data-postback-provider>';
@@ -473,7 +473,7 @@ function buyerManual(): void {
     <p><a href="https://docs.limonad.com/doc/en-webmaster-token" target="_blank" rel="noopener noreferrer">Где взять токен Lemonad</a>.</p>
     <p>Для Skylead/Cashfactories выберите сеть в поле «Партнёрка для отправки», вставьте API-токен из профиля и попросите менеджера активировать API. Выберите тип аккаунта: Вебмастер или Агентство. В связке укажите числовой ID оффера, страну и валюту. ID потока нужен только вебмастеру; для агентства идентификатор заявки создаётся автоматически. В связке выберите режим IP: реальный из Client IP или согласованный с ПП случайный IP страны при отсутствии реального. Для генерации обязательно выберите страну; адрес фиксируется один раз и виден в карточке лида. Действующие заявки не изменяются. <a href="https://my.skylead.biz/help/api.php#push" target="_blank" rel="noopener noreferrer">API Skylead</a> · <a href="https://cashfactories.com/help/api.en.php#push" target="_blank" rel="noopener noreferrer">API Cashfactories</a>.</p>
     <h3>3. Добавьте постбэк в партнёрке</h3>
-    <p>Выберите формат своей сети в карточке партнёрки и следуйте инструкции под ссылкой. Для Skylead/Cashfactories отметьте все пять статусов; постбэк потока имеет приоритет над глобальным. Существующую доставку конверсий в Binom нужно сохранить отдельно.</p>
+    <p>Выберите формат своей сети в карточке партнёрки и следуйте инструкции под ссылкой. Для агентства Skylead/Cashfactories статусы автоматически читаются через API; оставьте постбэк на Binom. Для вебмастера отметьте все пять статусов; постбэк потока имеет приоритет над глобальным. Существующую доставку конверсий в Binom нужно сохранить отдельно.</p>
     <p>В сохранённой партнёрке найдите «Статусы ПП → таблица → TikTok» и нажмите <strong>Скопировать URL постбэка</strong>. В Lemonad откройте <strong>Профиль → Global postback and API → Add postback</strong>, вставьте ссылку целиком и включите все пять статусов:</p>
     <div class="scroll"><table><tr><th>Статус Lemonad</th><th>Значение</th></tr><tr><td>Новый лид</td><td>new</td></tr><tr><td>Подтверждён</td><td>approved</td></tr><tr><td>Отклонён</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td></tr><tr><td>Оплачен</td><td>paid</td></tr></table></div>
     <p>Эта ссылка работает для всех связок, использующих выбранную запись партнёрки. Постбэки по лидам, которых нет в мосте, игнорируются. Сохраните существующий постбэк <strong>Lemonad → Binom</strong>: он нужен для зачёта конверсий в трекере. Постбэк на мост обновляет статусы в таблице. <a href="https://docs.limonad.com/doc/en-postback" target="_blank" rel="noopener noreferrer">Инструкция Lemonad</a>.</p>
@@ -591,11 +591,11 @@ function panel(): void {
             if($page==='route'&&$edit){
                 echo '<div class="card"><details><summary>Проверка трекера</summary><p>Создаёт один технический клик с тестовыми метками. Заявка в партнёрку не отправляется.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="diagnose"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Проверить: создать тестовый клик</button></form>';
                 if(!empty($v['diagnostic']))echo '<pre>'.h(json_encode($v['diagnostic'],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre>';echo '</details></div>';
-                echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><p>Один глобальный постбэк на весь аккаунт Lemonad. <a href="?page=partner&amp;edit='.h($v['partner']).'">Открыть URL и инструкцию в настройках партнёрки →</a></p></div>';$conf=['BRIDGE_URL'=>setting('base_url').'/action.php','ROUTE_ID'=>$edit,'BRIDGE_SECRET'=>$v['secret']];echo '<div class="card">';connectionGuide($conf);echo '<p class="muted">При изменении кампании уже принятые лиды сохраняют прежние настройки.</p><div class="actions"><form method="post">'.csrf().'<input type="hidden" name="op" value="duplicate"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Дублировать связку</button></form></div><details><summary>Заменить ключ отправки</summary><p>После замены обновите настройки всех подключённых к этой связке таблиц.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="rotate"><input type="hidden" name="id" value="'.h($edit).'"><button class="danger">Выпустить новый секрет</button></form></details></div>';}
+                echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><p>Способ получения статусов указан в настройках аккаунта ПП. <a href="?page=partner&amp;edit='.h($v['partner']).'">Открыть URL и инструкцию в настройках партнёрки →</a></p></div>';$conf=['BRIDGE_URL'=>setting('base_url').'/action.php','ROUTE_ID'=>$edit,'BRIDGE_SECRET'=>$v['secret']];echo '<div class="card">';connectionGuide($conf);echo '<p class="muted">При изменении кампании уже принятые лиды сохраняют прежние настройки.</p><div class="actions"><form method="post">'.csrf().'<input type="hidden" name="op" value="duplicate"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Дублировать связку</button></form></div><details><summary>Заменить ключ отправки</summary><p>После замены обновите настройки всех подключённых к этой связке таблиц.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="rotate"><input type="hidden" name="id" value="'.h($edit).'"><button class="danger">Выпустить новый секрет</button></form></details></div>';}
         }
     }elseif($page==='leads'){
         $id=clean($_GET['id']??'',64);
-        if($id){$l=uiLead($id);if($l){$p=unseal($l['payload']);$s=unseal($l['snapshot']);echo '<div class="card"><h2>Лид '.h($l['external_id']).'</h2><p>'.h($s['route']['name']).' · <span class="badge">'.h($l['state']).'</span></p><pre>'.h(json_encode(['lead'=>$p,'partner_ip'=>$s['partner_ip']??null,'click_id'=>$l['click_id'],'partner_reference_id'=>$l['partner_id'],'partner_status'=>result($l)['partner_status'],'partner_status_updated'=>result($l)['partner_status_updated'],'message'=>$l['message'],'campaign_key'=>$s['route']['campaign_key'],'offer_id'=>$s['route']['offer_id']],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre>';if(($s['partner_ip']['source']??'')==='generated')echo '<p>IP сгенерирован для ПП · <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">IP Geolocation by DB-IP</a> · CC BY 4.0</p>';if(isAdmin()&&$l['response'])echo '<details><summary>Сохранённый ответ сервиса</summary><pre>'.h(json_encode(unseal($l['response']),JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre></details>';echo '</div>';
+        if($id){$l=uiLead($id);if($l){$p=unseal($l['payload']);$s=unseal($l['snapshot']);echo '<div class="card"><h2>Лид '.h($l['external_id']).'</h2><p>'.h($s['route']['name']).' · <span class="badge">'.h($l['state']).'</span></p><pre>'.h(json_encode(['lead'=>$p,'partner_ip'=>$s['partner_ip']??null,'click_id'=>$l['click_id'],'partner_reference_id'=>$l['partner_id'],'partner_status'=>result($l)['partner_status'],'partner_status_updated'=>result($l)['partner_status_updated'],'status_api_check'=>agencyPollInfo($id),'message'=>$l['message'],'campaign_key'=>$s['route']['campaign_key'],'offer_id'=>$s['route']['offer_id']],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre>';if(($s['partner_ip']['source']??'')==='generated')echo '<p>IP сгенерирован для ПП · <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">IP Geolocation by DB-IP</a> · CC BY 4.0</p>';if(isAdmin()&&$l['response'])echo '<details><summary>Сохранённый ответ сервиса</summary><pre>'.h(json_encode(unseal($l['response']),JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre></details>';echo '</div>';
                 if(in_array($l['state'],['binom_review','partner_review'])){echo '<div class="card"><h2>Действие после сверки</h2><p>При таймауте сервис мог принять запрос. Сначала проверьте трекер и партнёрку.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="reconcile"><input type="hidden" name="id" value="'.h($id).'">';$choices=['sent'=>'ПП уже приняла — указать номер заявки','resume'=>'Заявки в ПП нет — отправить с проверенным clickid'];if($l['state']==='binom_review')$choices['requeue']='Клика и заявки точно нет — начать заново';options('decision','Результат проверки',$choices);input('reference','Номер заявки или проверенный clickid','','text',false);echo '<label><input type="checkbox" name="verified" value="yes" required>Я сверил результат в трекере и ПП</label><button>Применить</button></form></div>';}}
         }else{$filter=clean($_GET['state']??'',40);$offset=max(0,(int)($_GET['offset']??0));
             $owner=isAdmin()?clean($_GET['owner']??'',80):'';

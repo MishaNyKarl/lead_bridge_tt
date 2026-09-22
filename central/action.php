@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.9.1';
+const BRIDGE_VERSION = '1.9.2';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -367,6 +367,16 @@ function diagnose(string $id): array {
     $out['mapping_checks']=mappingChecks($r,$p,$tokens,$t['version']);
     $r['diagnostic']=$out;saveEntity($id,'route',$r);audit('test_click',$id);return $out;
 }
+function routeCopyName(string $name,array $existing): string {
+    $base=preg_replace('/ copy[1-9][0-9]*$/u','',$name);
+    while(strlen($base)>230)$base=preg_replace('/.$/us','',$base);
+    $last=0;foreach($existing as $value)if(preg_match('/^'.preg_quote($base,'/').' copy([1-9][0-9]*)$/u',$value,$m))$last=max($last,(int)$m[1]);
+    if($last>=PHP_INT_MAX-1)throw new InvalidArgumentException('Слишком много копий');
+    return $base.' copy'.($last+1);
+}
+function routeCopyButton(string $id,string $name): string {
+    return '<form method="post" class="copy-route-form">'.csrf().'<input type="hidden" name="op" value="duplicate"><input type="hidden" name="id" value="'.h($id).'"><button type="submit" class="settings-link" aria-label="Дублировать '.h($name).'" title="Дублировать">'.uiIcon('copy').'</button></form>';
+}
 function mutate(): void {
     $me=requireUser();$op=$_POST['op']??'';
     if(in_array($op,['user_save','script_notice_publish','script_notice_withdraw','script_notice_ack'],true)){
@@ -403,7 +413,12 @@ function mutate(): void {
         }
         saveEntity($id,$kind,$v);sql('UPDATE entities SET owner=? WHERE id=?',[$owner,$id]);audit('save_'.$kind,$id);redirect('?page='.$kind.($kind==='route'?'&edit='.$id:''));
     }
-    if($op==='duplicate'){$id=required($_POST,'id');$r=uiEntity($id,'route');$r['name'].=' — копия';$r['active']=false;$r['secret']=bin2hex(random_bytes(32));$new='route_'.bin2hex(random_bytes(6));saveEntity($new,'route',$r);sql('UPDATE entities SET owner=? WHERE id=?',[ownerOf($id),$new]);audit('duplicate_route',$new);redirect('?page=route&edit='.$new);}
+    if($op==='duplicate'){
+        $id=required($_POST,'id');db()->exec('BEGIN IMMEDIATE');
+        try{$r=uiEntity($id,'route');$owner=ownerOf($id);$names=[];foreach(sql('SELECT data FROM entities WHERE kind=? AND owner=?',['route',$owner]) as $row)$names[]=unseal($row['data'])['name'];
+            $r['name']=routeCopyName($r['name'],$names);$r['secret']=bin2hex(random_bytes(32));$new='route_'.bin2hex(random_bytes(6));saveEntity($new,'route',$r);sql('UPDATE entities SET owner=? WHERE id=?',[$owner,$new]);audit('duplicate_route',$new);db()->exec('COMMIT');
+        }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}redirect('?page=route&edit='.$new);
+    }
     if($op==='rotate'){$id=required($_POST,'id');$r=uiEntity($id,'route');$r['secret']=bin2hex(random_bytes(32));saveEntity($id,'route',$r);audit('rotate_secret',$id);return;}
     if($op==='reconcile'){
         $id=required($_POST,'id',64);uiLead($id);$lock=fopen(home().'/lead-'.$id.'.lock','c');if(!flock($lock,LOCK_EX|LOCK_NB))throw new InvalidArgumentException('Лид сейчас обрабатывается');
@@ -525,7 +540,7 @@ function panel(): void {
 
     .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
     .sort-heading{display:inline-flex;gap:8px;align-items:center;color:inherit;white-space:nowrap}.sort-heading:hover{color:#265edb}.sort-heading span{font-size:15px;color:#8fa0b9}th[aria-sort=ascending] span,th[aria-sort=descending] span{color:#265edb}
-    .settings-link{display:inline-flex;padding:7px;border-radius:8px;color:#5c7191}.settings-link:hover{background:#eaf0fc;color:#265edb}.settings-link svg{width:19px;height:19px}
+    .row-actions{display:flex;gap:4px;align-items:center}.copy-route-form{margin:0}.copy-route-form button.settings-link{background:transparent;border:0;box-shadow:none;margin:0;cursor:pointer}.settings-link:focus-visible{outline:2px solid #265edb;outline-offset:2px}.settings-link{display:inline-flex;padding:7px;border-radius:8px;color:#5c7191}.settings-link:hover{background:#eaf0fc;color:#265edb}.settings-link svg{width:19px;height:19px}
     .field-help{display:inline-flex;vertical-align:middle;padding:2px;margin-left:4px;background:none;color:#8293ae;border-radius:50%;line-height:1}.field-help svg{width:15px;height:15px}.field-help:hover,.field-help:focus-visible{color:#265edb;background:#eaf0fc}
     #field-tooltip{position:fixed;z-index:1000;width:min(360px,calc(100vw - 24px));padding:15px 17px;background:#152b48;color:white;border-radius:12px;font:14px/1.55 system-ui;box-shadow:0 8px 28px #15223a35;pointer-events:auto}
     </style><?php if(!$auth):?><main class="login"><div class="card"><div class="brand">Lead <span>Bridge</span></div><p class="muted">Управление отправкой лидов</p><h1>Вход в панель</h1><?php if($error)echo '<div class="error">'.h($error).'</div>';?><form method="post"><?=csrf()?><input type="hidden" name="op" value="login"><?php input('login','Логин');input('password','Пароль','','password');?><button>Войти</button></form></div></main></html><?php return;endif;?>
@@ -544,7 +559,7 @@ function panel(): void {
             echo '<div class="actions" style="margin-bottom:20px"><a class="button" href="?page='.$page.'&new=1">Добавить</a></div><div class="card scroll"><table><tr>'.sortHeading('name','Название',$sortColumns).($showOwner?sortHeading('owner','Пользователь',$sortColumns):'').sortHeading('description','Параметры',$sortColumns).'<th><span class="sr-only">Настройки</span></th></tr>';
             foreach($all as $id=>$e){
                 $desc=entityDescription($page,$e,$id,$showOwner);
-                echo '<tr><td>'.h($e['name']).'</td>'.($showOwner?'<td>'.h(buyerLogin(ownerOf($id))).'</td>':'').'<td>'.h($desc).'</td><td><a class="settings-link" aria-label="Настроить '.h($e['name']).'" title="Настроить" href="?page='.$page.'&edit='.h($id).'">'.uiIcon('settings').'</a></td></tr>';
+                echo '<tr><td>'.h($e['name']).'</td>'.($showOwner?'<td>'.h(buyerLogin(ownerOf($id))).'</td>':'').'<td>'.h($desc).'</td><td><div class="row-actions">'.($page==='route'?routeCopyButton($id,$e['name']):'').'<a class="settings-link" aria-label="Настроить '.h($e['name']).'" title="Настроить" href="?page='.$page.'&edit='.h($id).'">'.uiIcon('settings').'</a></div></td></tr>';
             }
             if(!$all)echo '<tr><td colspan="'.($showOwner?4:3).'" class="muted">Пока нет записей</td></tr>';
             echo '</table></div>';
@@ -563,7 +578,7 @@ function panel(): void {
             if($page==='route'&&$edit){
                 echo '<div class="card"><details><summary>Проверка трекера</summary><p>Создаёт один технический клик с тестовыми метками. Заявка в партнёрку не отправляется.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="diagnose"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Проверить: создать тестовый клик</button></form>';
                 if(!empty($v['diagnostic']))echo '<pre>'.h(json_encode($v['diagnostic'],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre>';echo '</details></div>';
-                echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><p>Один глобальный постбэк на весь аккаунт Lemonad. <a href="?page=partner&amp;edit='.h($v['partner']).'">Открыть URL и инструкцию в настройках партнёрки →</a></p></div>';$conf=['BRIDGE_URL'=>setting('base_url').'/action.php','ROUTE_ID'=>$edit,'BRIDGE_SECRET'=>$v['secret']];echo '<div class="card">';connectionGuide($conf);echo '<p class="muted">При изменении кампании уже принятые лиды сохраняют прежние настройки.</p><div class="actions"><form method="post">'.csrf().'<input type="hidden" name="op" value="duplicate"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Дублировать как черновик</button></form></div><details><summary>Заменить ключ отправки</summary><p>После замены обновите настройки всех подключённых к этой связке таблиц.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="rotate"><input type="hidden" name="id" value="'.h($edit).'"><button class="danger">Выпустить новый секрет</button></form></details></div>';}
+                echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><p>Один глобальный постбэк на весь аккаунт Lemonad. <a href="?page=partner&amp;edit='.h($v['partner']).'">Открыть URL и инструкцию в настройках партнёрки →</a></p></div>';$conf=['BRIDGE_URL'=>setting('base_url').'/action.php','ROUTE_ID'=>$edit,'BRIDGE_SECRET'=>$v['secret']];echo '<div class="card">';connectionGuide($conf);echo '<p class="muted">При изменении кампании уже принятые лиды сохраняют прежние настройки.</p><div class="actions"><form method="post">'.csrf().'<input type="hidden" name="op" value="duplicate"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Дублировать связку</button></form></div><details><summary>Заменить ключ отправки</summary><p>После замены обновите настройки всех подключённых к этой связке таблиц.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="rotate"><input type="hidden" name="id" value="'.h($edit).'"><button class="danger">Выпустить новый секрет</button></form></details></div>';}
         }
     }elseif($page==='leads'){
         $id=clean($_GET['id']??'',64);

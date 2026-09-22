@@ -9,10 +9,10 @@ function displayDate(string $value,?string $timezone=null): string {
     catch(Throwable $e){return $value;}
 }
 function uiIcon(string $name): string {
-    $icons=['settings'=>'__ICON_SETTINGS__','help'=>'__ICON_HELP__'];
+    $icons=['settings'=>'__ICON_SETTINGS__','help'=>'__ICON_HELP__','copy'=>'__ICON_COPY__'];
     $svg=base64_decode($icons[$name]??'');
     // Source checkout and the compiled single-file build both work.
-    if(!$svg||!str_contains($svg,'<svg'))$svg=file_get_contents(__DIR__.'/icons/'.($name==='settings'?'settings':'circle-question-mark').'.svg');
+    if(!$svg||!str_contains($svg,'<svg'))$svg=file_get_contents(__DIR__.'/icons/'.(['settings'=>'settings','copy'=>'copy','help'=>'circle-question-mark'][$name]??'circle-question-mark').'.svg');
     return str_replace('<svg','<svg aria-hidden="true" focusable="false"',$svg);
 }
 function fieldHelp(string $name,string $label): string {

@@ -16,3 +16,8 @@ $_GET=['page'=>'route'];test(str_contains(fieldHelp('campaign_key','Campaign'),'
 $rows=['b'=>['name'=>'Бета'],'a'=>['name'=>'альфа']];$_GET=['sort'=>'name','dir'=>'asc'];test(array_keys(sortedEntities($rows,'partner',false))===['a','b'],'Cyrillic sorting');
 
 if(countryOptions()["ZA"]!=="ЮАР"||countryOptions("AU")["AU"]!=="AU")throw new RuntimeException("Country selector must preserve existing ISO codes");
+
+test(routeCopyName('Test',['Test copy1','Test copy3'])==='Test copy4','copy numbering uses highest suffix');
+test(routeCopyName('Test copy3',['Test copy1','Test copy3'])==='Test copy4','copy of copy retains base');
+test(strlen(routeCopyName(str_repeat('Я',125),[]))<=250,'long copy name remains editable');
+test(str_contains(uiIcon('copy'),'<svg'),'Lucide copy icon embedded');

@@ -5,7 +5,7 @@ source=(root/'action.php').read_text(encoding='utf-8')
 accounts=(root/'accounts.php').read_text(encoding='utf-8').removeprefix('<?php')
 source=source.replace("require_once __DIR__.'/accounts.php'; // __ACCOUNTS_MODULE__",accounts)
 ui=(root/'ui.php').read_text(encoding='utf-8').removeprefix('<?php')
-for key,name in [('SETTINGS','settings'),('HELP','circle-question-mark')]:
+for key,name in [('SETTINGS','settings'),('HELP','circle-question-mark'),('COPY','copy')]:
     ui=ui.replace('__ICON_'+key+'__',base64.b64encode((root/'icons'/(name+'.svg')).read_bytes()).decode('ascii'))
 source=source.replace("require_once __DIR__.'/ui.php'; // __UI_MODULE__",ui)
 source=source.replace('__COUNTRY_IP_BASE64__',base64.b64encode(gzip.compress((root/'ip-country.json').read_bytes(),mtime=0)).decode('ascii'))

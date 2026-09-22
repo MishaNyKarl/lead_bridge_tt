@@ -181,6 +181,25 @@ try:
  payload=json.dumps({'route_id':'route_a','op':'check'}).encode()
  assert_ok(Client().req(data=payload,headers={'Content-Type':'application/json','X-Bridge-Secret':'a'*64})[0]==401,'transfer rotates API secret')
  assert_ok(c.req('?page=leads&id='+ids['route_a'])[0]==200,'lead history follows route ownership')
+ # Duplicating an owned route preserves configuration, increments names and isolates its secret.
+ inspect=work/'inspect-route.php'
+ inspect.write_text("<?php define('BRIDGE_TEST',true);require $argv[1];echo json_encode(entity($argv[2],'route'));",encoding='utf8')
+ def route_data(rid):return json.loads(subprocess.check_output(['php',str(inspect),str(root/'action.php'),rid],env=env))
+ source=route_data('route_a');copies=[]
+ before=conn.execute("SELECT count(*) FROM entities WHERE kind='route'").fetchone()[0]
+ c.req(data={'csrf':'wrong','op':'duplicate','id':'route_a'})
+ assert_ok(conn.execute("SELECT count(*) FROM entities WHERE kind='route'").fetchone()[0]==before,'duplicate requires CSRF')
+ c.req('?page=route')
+ for n,source_id in enumerate(['route_a','route_a',None],1):
+  page=c.post(op='duplicate',id=source_id or copies[-1])[1]
+  rid=conn.execute("SELECT id FROM entities WHERE kind='route' AND owner=? ORDER BY rowid DESC LIMIT 1",(uid,)).fetchone()[0];copies.append(rid)
+  data=route_data(rid)
+  assert_ok(data['name']=='ROUTE_a copy'+str(n),'copy numbering '+str(n))
+  assert_ok(data['secret']!=source['secret'] and len(data['secret'])==64,'copy has new secret')
+  assert_ok({k:v for k,v in data.items() if k not in ['name','secret']}=={k:v for k,v in source.items() if k not in ['name','secret']},'copy preserves all route settings')
+  assert_ok(a.req('?page=route&edit='+rid)[0]==404,'copy stays with owner')
+ assert_ok(len({route_data(rid)['secret'] for rid in copies})==3,'copies have distinct secrets')
+ assert_ok(conn.execute('SELECT count(*) FROM leads').fetchone()[0]==len(ids),'no leads copied or sent')
  # Password reset and disabling immediately invalidate existing sessions.
  admin.post(op='user_save',id='buyer_b',name='Buyer b',role='buyer',password='reset-password-123',active='on')
  assert_ok('Вход в панель' in b.req()[1],'password reset invalidates session')

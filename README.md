@@ -1,5 +1,15 @@
 # Lead Bridge
 
+## Тип аккаунта ПП (1.10)
+
+В карточке Skylead/Cashfactories выберите «Вебмастер» или «Агентство». Старые записи без этой настройки остаются вебмастерами. Для Lemonad выбор не используется. Это режим интеграции, он не меняет тип или права аккаунта в самой ПП.
+
+Вебмастер: `/wm/push.json`, обязательны числовые offer и flow. Агентство: `/ext/add.json`, offer без flow; поле потока в связке скрывается. Базовые адреса Skylead `https://api.skylead.biz` и Cashfactories `https://cashfactories.com/api`. Агентский extu — стабильный SHA-256 от namespace баера и строкового TikTok Lead ID; exts — логин баера. Исходный TikTok Lead ID остаётся в uuid, подтверждённый clickid — в subid. IP и остальные метки передаются в обоих режимах. Ответ считается успешным только с status=ok и внутренним id; uid не заменяет id.
+
+Тип можно менять для существующей записи: он применяется к новым заявкам всех её связок. Принятые заявки и ручные повторы используют исходный snapshot. После переключения агентства на вебмастера проверьте ID потока в каждой связке. Настройки Sheets и URL постбэка менять не требуется. API `/leads/add.json` скачанного лендинга этим выбором не подключается.
+
+Документация агентства: [Skylead](https://my.skylead.biz/help/api.php#extadd), [Cashfactories](https://cashfactories.com/help/api.en.php#extadd).
+
 TikTok Instant Forms → Google Sheets → очередь PHP → Binom v1/v2 → Lemonad. Обратный путь: Lemonad → мост → Sheets → TikTok Signal postback.
 
 Панель: https://bridge.naturalsolution.help/. Доступ выдаёт администратор. Рабочие настройки, секреты и лиды в репозиторий не входят.

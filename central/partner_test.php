@@ -28,6 +28,26 @@ foreach(['skylead'=>'https://api.skylead.biz/wm/push.json','cashfactories'=>'htt
  $p['lead_id']=(string)++$n;$a=enqueue('r',$r,$p);$calls=0;processLead($a['receipt'],function()use(&$calls){$calls++;return ['code'=>200,'error'=>'','body'=>'{}'];});ck($calls===1,'invalid tracker never calls partner');
 }
 
+// Account mode is immutable for queued leads, including legacy webmaster snapshots.
+foreach(['skylead'=>'https://api.skylead.biz/ext/add.json','cashfactories'=>'https://cashfactories.com/api/ext/add.json'] as $type=>$endpoint){
+ $agency=['type'=>$type,'account_type'=>'agency','token'=>'test'];$ar=$r;unset($ar['flow_id']);
+ $p['lead_id']='123456789012345678901234';
+ [$url,$request]=partnerRequest($agency,$ar,$p,'https://bridge.example','click1');$body=json_decode($request,true);
+ ck($url===$endpoint.'?id=test'&&!isset($body['flow'])&&$body['offer']==='123','agency endpoint and no flow '.$type);
+ ck($body['uuid']===$p['lead_id']&&$body['subid']==='click1'&&strlen($body['extu'])===64&&$body['exts']===$r['buyer'],'agency identity and attribution '.$type);
+ $other=$ar;$other['buyer']='other';ck(json_decode(partnerRequest($agency,$other,$p,'https://bridge.example','click1')[1],true)['extu']!==$body['extu'],'agency identities isolated by buyer');
+ rejects(fn()=>validatePartnerLead(['type'=>$type],$ar,$p),'webmaster still requires flow');
+ rejects(fn()=>partnerApiUrl(['type'=>$type,'account_type'=>'wrong']),'invalid mode rejected');
+ foreach(['webmaster','agency'] as $mode){
+  $partner=['type'=>$type,'token'=>'test'];if($mode==='agency')$partner['account_type']='agency';saveEntity('p','partner',$partner);
+  $p['lead_id']=(string)++$n;$a=enqueue('r',$mode==='agency'?$ar:$r,$p);
+  saveEntity('p','partner',['type'=>$type,'token'=>'changed','account_type'=>$mode==='agency'?'webmaster':'agency']);
+  $calls=[];processLead($a['receipt'],function($url,$request)use(&$calls){$calls[]=[$url,$request];return ['code'=>200,'error'=>'','body'=>str_contains($url,'tracker.example')?'{"click_info":{"id":"confirmed-click"}}':'{"status":"ok","id":1234,"uid":"external"}'];});
+  ck(count($calls)===2&&str_contains($calls[1][0],$mode==='agency'?'/ext/add.json':'/wm/push.json')&&str_ends_with($calls[1][0],'id=test'),'snapshot retains mode and token '.$mode.' '.$type);
+  ck(sql('SELECT state FROM leads WHERE id=?',[$a['receipt']])->fetchColumn()==='sent','agency/webmaster mock accepted');
+ }
+}
+
 // Generated addresses are persisted outside the incoming payload/fingerprint.
 $partner=['type'=>'skylead','token'=>'mock'];saveEntity('p','partner',$partner);
 $r['partner_ip_mode']='country_random';$r['country']='ZA';saveEntity('r','route',$r);unset($p['ip']);$p['lead_id']='999001';

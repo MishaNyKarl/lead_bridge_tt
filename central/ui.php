@@ -20,7 +20,8 @@ function fieldHelp(string $name,string $label): string {
     $tips=[
       'partner_ip_mode'=>'По умолчанию используется реальный Client IP из таблицы. Для Instant Forms без IP выберите согласованный с ПП временный режим генерации и страну. Для каждой новой заявки мост выбирает адрес из диапазонов этой страны и сохраняет его; повторы не меняют IP. Реальный IP имеет приоритет. Режим действует только для Skylead/Cashfactories.',
       'type'=>'Выберите сеть, в которой вы получили токен. Для другой сети создайте отдельный аккаунт партнёрки. Существующие заявки сохраняют прежние настройки.',
-      'flow_id'=>'Для Skylead/Cashfactories: числовой ID из раздела Потоки или API flows. Поток должен относиться к выбранному офферу и вашему аккаунту. Для Lemonad поле не используется.',
+      'account_type'=>'Тип вашего аккаунта в Skylead/Cashfactories. Вебмастер использует API wm/push и ID потока; Агентство использует ext/add без потока. Выбор здесь не меняет права аккаунта в ПП — уточните тип у менеджера. Lemonad эта настройка не нужна.',
+      'flow_id'=>'Только для вебмастера Skylead/Cashfactories: числовой ID из раздела Потоки или API flows. Для агентства поток не нужен. Поток должен относиться к выбранному офферу и вашему аккаунту. Для Lemonad поле не используется.',
       'country'=>'Выберите страну покупателей вашего оффера. В API отправляется код ISO, например ZA для ЮАР. В режиме случайного IP страна определяет диапазоны генерации. В обычном режиме IP берётся из таблицы. Для Skylead/Cashfactories рекомендуется указать явно, чтобы ПП не определяла страну по IP. Для Lemonad поле не используется.',
       'currency'=>'Валюта заказа: три латинские буквы, например ZAR. Не сумма выплаты. Для Lemonad поле не используется.',
       'partner_meta_mode'=>'Выберите, что отправлять в Lemonad. Основные ID добавят группу в utm_term и ваш логин в utm_medium. Все метки сложат дополнительные поля в один JSON-текст utm_term. Это не отдельные колонки в ПП; полный набор всегда доступен в карточке лида моста.',
@@ -33,7 +34,7 @@ function fieldHelp(string $name,string $label): string {
       'tracker'=>'Выберите уже добавленный трекер Binom, в котором находится кампания этой связки. Если список пуст, сначала сохраните трекер в разделе «Трекеры».',
       'partner'=>'Выберите сохранённый аккаунт партнёрки, куда должны поступать заявки. Если список пуст, добавьте его в «Партнёрки». Для новых продуктов того же аккаунта используйте эту же запись: глобальный постбэк уже будет работать.',
       'campaign_key'=>'В Binom откройте ссылку нужной кампании: например https://tracker.com/click?key=ABC123. Скопируйте только ABC123 — значение после key= и до следующего &. Это не Campaign ID TikTok и не номер кампании в списке Binom.',
-      'offer_id'=>'Skylead/Cashfactories: числовой offer ID из API/кода оффера. Lemonad: API Offer ID продукта. Возьмите offerId в коде/API-настройках оффера или запросите у менеджера. Обычно это длинный идентификатор с дефисами. Номер в названии вроде [4075] сюда не подходит.',
+      'offer_id'=>'Skylead/Cashfactories: число из параметра offer в коде оффера, например offer=1431 — вставьте 1431. Это не токен аккаунта (id), не лендинг (site) и не поток (flow). Только для Lemonad: длинный API Offer ID с дефисами; номер в названии вроде [4075] не подходит.',
       'active'=>'Включённая связка принимает новые заявки из подключённой таблицы. Выключенная ставит приём новых заявок на паузу. Уже принятые заявки продолжают обрабатываться, постбэки по старым лидам тоже принимаются.'
     ];
     $tip=$tips[$name]??'';
@@ -106,6 +107,6 @@ function countryOptions(string $current=''): array {
 
 function routePartnerSelect(string $selected): void {
     echo '<label for="field_partner">Аккаунт ПП'.fieldHelp('partner','Аккаунт ПП').'<select id="field_partner" name="partner" required data-route-partner><option value="">Выберите партнёрку</option>';
-    foreach(uiEntities('partner') as $id=>$partner){$type=$partner['type']??'lemonad';echo '<option value="'.h($id).'" data-provider="'.h($type).'" '.($id===$selected?'selected':'').'>'.h((postbackProviders()[$type]??$type).' · '.$partner['name']).'</option>';}
+    foreach(uiEntities('partner') as $id=>$partner){$type=$partner['type']??'lemonad';echo '<option value="'.h($id).'" data-provider="'.h($type).'" data-account-type="'.h(partnerAccountType($partner)).'" '.($id===$selected?'selected':'').'>'.h((postbackProviders()[$type]??$type).' · '.$partner['name']).'</option>';}
     echo '</select></label>';
 }

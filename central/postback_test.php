@@ -37,3 +37,26 @@ sql("INSERT INTO leads(id,route,external_id,fingerprint,state,payload,snapshot,c
 ok(receivePostback($account)['status']==='ignored','ambiguous click does not update arbitrary lead');
 ok((int)sql('SELECT count(*) FROM postback_conflicts')->fetchColumn()===1,'ambiguous callback stored for review');
 ok(!sql("SELECT 1 FROM partner_status WHERE lead='l3'")->fetchColumn(),'collision does not write status');
+
+// Skylead/Cashfactories stage values normalize without changing delivery or snapshots.
+$sky=array_replace($account,['postback'=>'skylead','clickid'=>'click-2','leadid'=>'pp-2']);
+$before=sql("SELECT snapshot FROM leads WHERE id='l2'")->fetchColumn();
+foreach(['hold'=>'hold','approve'=>'approved','cancel'=>'rejected','trash'=>'trash'] as $raw=>$expected){
+    receivePostback(array_replace($sky,['status'=>$raw]));
+    ok(sql("SELECT status FROM partner_status WHERE lead='l2'")->fetchColumn()===$expected,'Skylead maps '.$raw);
+    if($raw==='approve'){
+        ok(!receivePostback(array_replace($sky,['status'=>'hold']))['applied'],'late hold cannot undo approval');
+        ok(!receivePostback(array_replace($sky,['status'=>'wait']))['applied'],'late wait cannot undo approval');
+    }
+}
+$cash=array_replace($sky,['postback'=>'cashfactories','status'=>'approve']);
+ok(receivePostback($cash)['applied'],'Cashfactories uses same mapping');
+ok(receivePostback($cash)['duplicate'],'Cashfactories duplicate idempotent');
+try{receivePostback(array_replace($sky,['status'=>'unknown']));throw new RuntimeException('unknown stage accepted');}catch(InvalidArgumentException $e){ok(true,'unknown Skylead stage rejected');}
+try{receivePostback(array_replace($sky,['postback'=>'lemonad','status'=>'hold']));throw new RuntimeException('Lemonad accepted hold');}catch(InvalidArgumentException $e){ok(true,'Lemonad status rules unchanged');}
+ok(sql("SELECT snapshot FROM leads WHERE id='l2'")->fetchColumn()===$before,'postback leaves snapshot unchanged');
+ok(sql("SELECT state FROM leads WHERE id='l2'")->fetchColumn()==='sent','postback leaves delivery unchanged');
+setting('base_url','https://bridge.example.com');
+ok(str_contains(partnerPostbackUrl('p1','skylead'),'clickid={subid}&status={stage}&leadid={id}'),'Skylead macros exact');
+ok(str_contains(partnerPostbackUrl('p1','cashfactories'),'postback=cashfactories'),'Cashfactories URL selector');
+ok(str_contains(partnerPostbackUrl('p1','lemonad'),'clickid={clickid}&status={status}&leadid={leadid}'),'Lemonad URL unchanged');

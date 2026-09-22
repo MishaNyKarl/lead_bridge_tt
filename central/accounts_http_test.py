@@ -86,6 +86,16 @@ try:
  assert_ok(a.req('?page=users')[0]==403,'accounts page admin only')
  assert_ok('Последние действия' not in a.req('?page=settings')[1],'global audit hidden')
  conn=sqlite3.connect(work/'bridge.sqlite');ids=dict(conn.execute('SELECT route,id FROM leads'))
+ # Postback format is owner-scoped and must not switch outbound integration.
+ assert_ok('недоступна' in a.post(op='postback_provider',id='partner_b',postback_provider='skylead')[1],'foreign postback preference blocked')
+ assert_ok('Неизвестная' in a.post(op='postback_provider',id='partner_a',postback_provider='bad')[1],'postback provider allowlist')
+ a.post(op='postback_provider',id='partner_a',postback_provider='skylead')
+ page=a.req('?page=partner&edit=partner_a')[1]
+ assert_ok('value="skylead" selected' in page and 'clickid={subid}&amp;status={stage}&amp;leadid={id}' in page,'Skylead preference saved and guide rendered')
+ a.post(op='postback_provider',id='partner_a',postback_provider='cashfactories')
+ assert_ok('postback=cashfactories' in a.req('?page=partner&edit=partner_a')[1],'Cashfactories guide rendered')
+ a.post(op='postback_provider',id='partner_a',postback_provider='lemonad')
+ assert_ok('clickid={clickid}' in a.req('?page=partner&edit=partner_a')[1],'Lemonad guide restored')
  # Announcements are admin-published, acknowledged per user and version, never by viewing.
  banner='id="script-update-notice"'
  assert_ok('Уведомить об обновлении Apps Script' in admin.req('?page=settings')[1],'admin has script announcement controls')

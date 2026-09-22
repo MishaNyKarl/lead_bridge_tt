@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.6.2';
+const BRIDGE_VERSION = '1.7.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -186,7 +186,10 @@ function receivePostback(array $a): array {
     $click=clean($a['clickid']??'',200);if($pid!==''&&!preg_match('/^[a-zA-Z0-9_-]{1,200}$/D',$click))return ['status'=>'ignored','message'=>'No matching bridge click'];$raw=strtolower(required($a,'status',30));$partnerLead=clean($a['leadid']??'',100);
     if(!preg_match('/^[a-zA-Z0-9_-]{1,200}$/D',$click))throw new InvalidArgumentException('Invalid clickid');
     $map=['new'=>'new','lead'=>'new','approve'=>'approved','approved'=>'approved','confirmed'=>'approved','reject'=>'rejected','rejected'=>'rejected','trash'=>'trash','paid'=>'paid','payout'=>'paid'];
-    if(!isset($map[$raw]))throw new InvalidArgumentException('Use status: new, approved, rejected, trash, paid');
+    $provider=clean($a['postback']??'lemonad',30);
+    if(!in_array($provider,['lemonad','skylead','cashfactories'],true))throw new InvalidArgumentException('Unknown postback provider');
+    if($provider!=='lemonad')$map=['wait'=>'new','hold'=>'hold','approve'=>'approved','cancel'=>'rejected','trash'=>'trash'];
+    if(!isset($map[$raw]))throw new InvalidArgumentException('Invalid status for selected postback provider');
     $status=$map[$raw];db()->exec('BEGIN IMMEDIATE');
     try{
         if($pid!==''){
@@ -205,7 +208,7 @@ function receivePostback(array $a): array {
         if($old&&$old['partner_lead_id']!==''&&$partnerLead!==''&&$old['partner_lead_id']!==$partnerLead)throw new InvalidArgumentException('Partner lead ID mismatch',409);
         if($old&&$old['status']===$status){db()->exec('COMMIT');return ['status'=>'ok','duplicate'=>true];}
         // A delayed initial event must not undo a decision; payment is terminal.
-        $apply=!$old||($status!=='new'&&$old['status']!=='paid');$now=gmdate('c');
+        $apply=!$old||($status!=='new'&&$old['status']!=='paid'&&($status!=='hold'||$old['status']==='new'));$now=gmdate('c');
         sql('INSERT INTO partner_events(lead,status,received,applied) VALUES(?,?,?,?)',[$id,$status,$now,(int)$apply]);
         if($apply)sql('INSERT INTO partner_status VALUES(?,?,?,?) ON CONFLICT(lead) DO UPDATE SET status=excluded.status,partner_lead_id=excluded.partner_lead_id,updated=excluded.updated',[$id,$status,$partnerLead?:($old['partner_lead_id']??''),$now]);
         db()->exec('COMMIT');return ['status'=>'ok','applied'=>$apply];
@@ -217,10 +220,26 @@ function postback(): never {
     catch(InvalidArgumentException $e){$code=in_array($e->getCode(),[401,409])?$e->getCode():400;jsonReply(['status'=>'error','message'=>$e->getMessage()],$code);}
     catch(Throwable $e){error_log('Bridge postback: '.get_class($e));jsonReply(['status'=>'error','message'=>'Temporary error'],503);}
 }
-function postbackGuide(string $pid): void {
-    $url=setting('base_url').'/action.php?postback=lemonad&partner='.rawurlencode($pid).'&key='.partnerPostbackKey($pid).'&clickid={clickid}&status={status}&leadid={leadid}';
-    echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><p>Добавьте этот GET-URL один раз в глобальные постбэки аккаунта Lemonad. Он обслуживает все его текущие и будущие связки в мосте. Существующий постбэк в Binom сохраните.</p><pre id="partner-postback">'.h($url).'</pre><button type="button" data-copy="partner-postback">Скопировать URL постбэка</button><p>Включите все пять статусов и задайте им значения:</p><table><tr><th>Статус Lemonad</th><th>Значение</th></tr><tr><td>Новый лид</td><td>new</td></tr><tr><td>Подтверждён</td><td>approved</td></tr><tr><td>Отклонён</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td></tr><tr><td>Оплачен</td><td>paid</td></tr></table><p>Постбэки по лидам, которых нет в мосте, игнорируются с ответом 200 OK. Поиск учитывает аккаунт ПП на момент отправки заявки. Неоднозначные совпадения сохраняются для проверки администратором. Ключ даёт право передавать статусы этого аккаунта: не публикуйте ссылку. Изменение кампаний и ключей связок не меняет этот URL. Старые ссылки постбэков отдельных связок также работают.</p><p>Обновите Apps Script из раздела «Подключение» и выполните «Подготовить и проверить». Он добавит <code>TikTok Lead Status</code> и <code>Partner Status Updated</code>. Статусы уже отправленных заявок проверяются пакетами по 100 строк за запуск на лист; новые лиды повторно не отправляются.</p><p>В TikTok Signal postback сопоставьте Lead status → TikTok Lead Status и настройте события для этих значений. Пока постбэк не получен, статус пустой. SENT означает только приём заявки. Старые статусы появятся после повторной отправки постбэка из ПП.</p><p class="muted">Повтор одинакового текущего статуса ничего не меняет. Запоздалый new не отменяет решение; paid — окончательный статус. Для approved/rejected/trash применяется последний полученный статус, так как ПП не передаёт время события в этом шаблоне.</p><p id="copy-status" role="status" aria-live="polite"></p></div>';
+function postbackProviders(): array {return ['lemonad'=>'Lemonad','skylead'=>'Skylead','cashfactories'=>'Cashfactories'];}
+function partnerPostbackUrl(string $pid,string $provider): string {
+    if(!isset(postbackProviders()[$provider]))throw new InvalidArgumentException('Неизвестная партнёрка');
+    $tail=$provider==='lemonad'?'&clickid={clickid}&status={status}&leadid={leadid}':'&clickid={subid}&status={stage}&leadid={id}';
+    return setting('base_url').'/action.php?postback='.$provider.'&partner='.rawurlencode($pid).'&key='.partnerPostbackKey($pid).$tail;
 }
+function postbackGuide(string $pid): void {
+    $provider=setting('postback_provider_'.$pid)?:'lemonad';if(!isset(postbackProviders()[$provider]))$provider='lemonad';
+    $url=partnerPostbackUrl($pid,$provider);
+    echo '<div class="card"><h2>Статусы ПП → таблица → TikTok</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="postback_provider"><input type="hidden" name="id" value="'.h($pid).'"><label for="postback-provider">Партнёрка для обратного постбэка<select id="postback-provider" name="postback_provider" data-postback-provider>';
+    foreach(postbackProviders() as $value=>$label)echo '<option value="'.h($value).'" '.($value===$provider?'selected':'').'>'.h($label).'</option>';
+    echo '</select></label><button class="secondary">Применить</button></form><p class="muted">Выбор меняет формат обратной ссылки и инструкцию. Он не переключает API отправки лидов: сейчас отправка из моста реализована для Lemonad.</p>';
+    if($provider==='lemonad')echo '<p>Добавьте GET-URL один раз в Lemonad → Global postback and API. Он обслуживает все связки этой записи партнёрки. Существующий постбэк в Binom сохраните.</p>';
+    else echo '<p>В '.h(postbackProviders()[$provider]).' вставьте GET-URL в глобальный «Постбек» либо в поле «Постбек» потока. Отметьте все пять галочек: Ожидает, Холд, Принят, Отмена, Треш.</p><p><strong>Поточный постбэк имеет приоритет над глобальным.</strong> Если в потоке уже стоит ссылка Binom, не заменяйте её без настройки отдельной доставки в Binom: мост сам конверсии в трекер не отправляет. Уточните возможность нескольких адресов у ПП. Для одного аккаунта используйте одну запись партнёрки в мосте и её ссылку во всех нужных потоках.</p>';
+    echo '<pre id="partner-postback">'.h($url).'</pre><button type="button" data-copy="partner-postback">Скопировать URL постбэка</button>';
+    if($provider==='lemonad')echo '<p>Включите все пять статусов и задайте им значения:</p><table><tr><th>Статус Lemonad</th><th>Значение</th></tr><tr><td>Новый лид</td><td>new</td></tr><tr><td>Подтверждён</td><td>approved</td></tr><tr><td>Отклонён</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td></tr><tr><td>Оплачен</td><td>paid</td></tr></table>';
+    else echo '<p>Макросы оставьте без изменений: <code>{subid}</code> — исходный clickid Binom, <code>{stage}</code> — статус, <code>{id}</code> — ID заказа ПП. При отправке лида в ПП в subid должен попасть clickid Binom. Чужие лиды, которых нет в мосте, не появятся в таблице от одного постбэка.</p><table><tr><th>В партнёрке</th><th>{stage}</th><th>В таблице</th></tr><tr><td>Ожидает</td><td>wait</td><td>new</td></tr><tr><td>Холд</td><td>hold</td><td>hold</td></tr><tr><td>Принят</td><td>approve</td><td>approved</td></tr><tr><td>Отмена</td><td>cancel</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td><td>trash</td></tr></table><p>Холд не является апрувом. Если используете hold в Signal postback TikTok, настройте для него отдельное сопоставление. Макросы paid/currency для обновления статуса в Sheets не нужны.</p><p><a href="https://my.skylead.biz/help/wm.php#postback" target="_blank" rel="noopener noreferrer">Документация общего формата Skylead</a> · <a href="https://my.skylead.biz/help/api.php" target="_blank" rel="noopener noreferrer">API Skylead</a>. Для Cashfactories используется тот же формат постбэка.</p>';
+    echo '<p>Постбэки по лидам, которых нет в мосте, игнорируются с ответом 200 OK. Поиск учитывает аккаунт ПП на момент отправки заявки. Неоднозначные совпадения сохраняются для проверки администратором. Ключ даёт право передавать статусы этого аккаунта: не публикуйте ссылку. Изменение кампаний и ключей связок не меняет этот URL. Старые ссылки постбэков отдельных связок также работают.</p><p>Используйте текущий Apps Script из раздела «Подключение» и выполните «Подготовить и проверить». Он добавит <code>TikTok Lead Status</code> и <code>Partner Status Updated</code>. Статусы уже отправленных заявок проверяются пакетами по 100 строк за запуск на лист; новые лиды повторно не отправляются.</p><p>В TikTok Signal postback сопоставьте Lead status → TikTok Lead Status и настройте события для этих значений. Пока постбэк не получен, статус пустой. SENT означает только приём заявки. Старые статусы появятся после повторной отправки постбэка из ПП.</p><p class="muted">Повтор одинакового текущего статуса ничего не меняет. Запоздалые new/hold не отменяют решение; paid — окончательный статус. Для approved/rejected/trash применяется последний полученный статус, так как ПП не передаёт время события в этом шаблоне.</p><p id="copy-status" role="status" aria-live="polite"></p></div>';
+}
+
 function jsonReply(array $a,int $code=200): never { http_response_code($code);header('Content-Type: application/json; charset=utf-8');echo json_encode($a,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR);exit; }
 function api(): never {
     if((int)($_SERVER['CONTENT_LENGTH']??0)>65536)jsonReply(['message'=>'Request too large'],413);
@@ -294,6 +313,11 @@ function mutate(): void {
         db()->exec('BEGIN IMMEDIATE');try{accountMutation($op);db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return;
     }
     if(accountMutation($op))return;
+    if($op==='postback_provider'){
+        $id=required($_POST,'id',80);uiEntity($id,'partner');$provider=required($_POST,'postback_provider',30);
+        if(!isset(postbackProviders()[$provider]))throw new InvalidArgumentException('Неизвестная партнёрка');
+        setting('postback_provider_'.$id,$provider);audit('postback_provider_'.$provider,$id);return;
+    }
     if($op==='logout'){endPanelSession();redirect('?');}
     if($op==='diagnose'){diagnose(required($_POST,'id'));return;}
     if($op==='save'){
@@ -506,6 +530,7 @@ function panel(): void {
     document.getElementById('help-close').addEventListener('click',function(){helpDialog.close();});
     helpDialog.addEventListener('close',function(){document.body.classList.remove('help-visible');helpOpen.focus();});
     helpDialog.addEventListener('click',function(event){if(event.target!==helpDialog)return;var box=helpDialog.getBoundingClientRect();if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom)helpDialog.close();});
+    document.querySelectorAll('[data-postback-provider]').forEach(function(select){select.addEventListener('change',function(){select.form.requestSubmit();});});
     document.querySelectorAll('[data-user-filter]').forEach(function(select){select.addEventListener('change',function(){select.form.requestSubmit();});});
     function feedback(button,label,success){
         clearTimeout(button.feedbackTimer);

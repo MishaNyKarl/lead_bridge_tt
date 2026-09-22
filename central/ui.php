@@ -103,3 +103,9 @@ function countryOptions(string $current=''): array {
     if($current!==''&&!isset($countries[$current]))$countries[$current]=$current;
     return [''=>'Не указана — ПП определит по реальному IP']+$countries;
 }
+
+function routePartnerSelect(string $selected): void {
+    echo '<label for="field_partner">Аккаунт ПП'.fieldHelp('partner','Аккаунт ПП').'<select id="field_partner" name="partner" required data-route-partner><option value="">Выберите партнёрку</option>';
+    foreach(uiEntities('partner') as $id=>$partner){$type=$partner['type']??'lemonad';echo '<option value="'.h($id).'" data-provider="'.h($type).'" '.($id===$selected?'selected':'').'>'.h((postbackProviders()[$type]??$type).' · '.$partner['name']).'</option>';}
+    echo '</select></label>';
+}

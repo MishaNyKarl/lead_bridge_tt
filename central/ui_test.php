@@ -14,3 +14,5 @@ foreach(['2','10000000000000000001','10'] as $i)sql('INSERT INTO leads(id,route,
 $_GET=['sort'=>'external_id','dir'=>'asc'];$ids=sql('SELECT external_id FROM leads ORDER BY '.leadOrder([]))->fetchAll(PDO::FETCH_COLUMN);test($ids===['2','10','10000000000000000001'],'large lead IDs sort without float precision loss');
 $_GET=['page'=>'route'];test(str_contains(fieldHelp('campaign_key','Campaign'),'key='),'field instructions included');test(str_contains(uiIcon('settings'),'<svg'),'Lucide icon embedded');
 $rows=['b'=>['name'=>'Бета'],'a'=>['name'=>'альфа']];$_GET=['sort'=>'name','dir'=>'asc'];test(array_keys(sortedEntities($rows,'partner',false))===['a','b'],'Cyrillic sorting');
+
+if(countryOptions()["ZA"]!=="ЮАР"||countryOptions("AU")["AU"]!=="AU")throw new RuntimeException("Country selector must preserve existing ISO codes");

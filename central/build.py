@@ -5,6 +5,7 @@ source=(root/'action.php').read_text(encoding='utf-8')
 accounts=(root/'accounts.php').read_text(encoding='utf-8').removeprefix('<?php')
 source=source.replace("require_once __DIR__.'/accounts.php'; // __ACCOUNTS_MODULE__",accounts)
 source=source.replace("require_once __DIR__.'/partner_poll.php'; // __POLL_MODULE__",(root/'partner_poll.php').read_text(encoding='utf-8').removeprefix('<?php'))
+source=source.replace("require_once __DIR__.'/overview.php'; // __OVERVIEW_MODULE__",(root/'overview.php').read_text(encoding='utf-8').removeprefix('<?php'))
 ui=(root/'ui.php').read_text(encoding='utf-8').removeprefix('<?php')
 for key,name in [('SETTINGS','settings'),('HELP','circle-question-mark'),('COPY','copy')]:
     ui=ui.replace('__ICON_'+key+'__',base64.b64encode((root/'icons'/(name+'.svg')).read_bytes()).decode('ascii'))

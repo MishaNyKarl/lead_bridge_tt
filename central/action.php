@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.11.0';
+const BRIDGE_VERSION = '1.12.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -13,6 +13,7 @@ function db(): PDO {
     $db->exec('CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY,v TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY,route TEXT NOT NULL,external_id TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,snapshot TEXT NOT NULL,click_id TEXT NOT NULL DEFAULT "",partner_id TEXT NOT NULL DEFAULT "",message TEXT NOT NULL DEFAULT "",response TEXT NOT NULL DEFAULT "",created TEXT NOT NULL,updated TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS leads_created ON leads(created);
       CREATE INDEX IF NOT EXISTS leads_state ON leads(state,created);
       CREATE INDEX IF NOT EXISTS leads_route ON leads(route,created);
       CREATE INDEX IF NOT EXISTS leads_external ON leads(external_id);
@@ -53,6 +54,7 @@ function saveEntity(string $id,string $kind,array $a): void { sql('INSERT INTO e
 function audit(string $event,string $id=''): void { sql('INSERT INTO audit(created,event,subject,actor) VALUES(?,?,?,?)',[gmdate('c'),$event,$id,$_SESSION['uid']??'system']); }
 require_once __DIR__.'/accounts.php'; // __ACCOUNTS_MODULE__
 require_once __DIR__.'/ui.php'; // __UI_MODULE__
+require_once __DIR__.'/overview.php'; // __OVERVIEW_MODULE__
 require_once __DIR__.'/partner_poll.php'; // __POLL_MODULE__
 function clean(mixed $v,int $max=250): string { if (!is_string($v)||strlen($v)>$max||preg_match('/[\x00-\x1F\x7F]/',$v)) throw new InvalidArgumentException('Некорректное текстовое поле'); return trim($v); }
 function required(array $a,string $k,int $max=250): string { $v=clean($a[$k]??'',$max); if($v==='') throw new InvalidArgumentException('Заполните поле: '.$k); return $v; }
@@ -561,10 +563,7 @@ function panel(): void {
     <main><div class="top"><div><h1><?=h($titles[$page])?></h1><div class="muted"><?=h(currentUser()['name'])?> · <?=isAdmin()?'Администратор':'Баер'?></div></div><form method="post"><?=csrf()?><input type="hidden" name="op" value="logout"><button class="secondary">Выйти</button></form></div>
     <?php if($error)echo '<div class="error">'.h($error).'</div>';if($notice)echo '<div class="success">'.h($notice).'</div>';
     if($page==='overview'){
-        [$scope,$params]=leadScope();$counts=[];foreach(sql('SELECT state,count(*) n FROM leads WHERE '.$scope.' GROUP BY state',$params) as $c)$counts[$c['state']]=(int)$c['n'];$pending=($counts['queued']??0)+($counts['click_ready']??0)+($counts['binom_pending']??0)+($counts['partner_pending']??0);$review=($counts['binom_review']??0)+($counts['partner_review']??0);
-        echo '<div class="stats">';foreach(['Всего лидов'=>array_sum($counts),'Принято ПП'=>$counts['sent']??0,'В обработке'=>$pending,'Нужна проверка'=>$review] as $k=>$n)echo '<div class="card stat"><span class="muted">'.h($k).'</span><strong>'.$n.'</strong></div>';echo '</div>';
-        $alive=time()-(int)setting('worker_heartbeat')<120;echo '<div class="card"><h2>Обработка лидов</h2><span class="badge '.($alive?'good':'warn').'">'.($alive?'Обработчик работает':'Нет свежего сигнала обработчика').'</span><p class="muted">Таблица → сохранение в очередь → клик в Binom → отправка в партнёрку. SENT означает подтверждённый приём, а не апрув.</p></div>';
-        echo '<div class="card"><h2>Управление связками</h2><p>Добавьте трекер и аккаунт Lemonad, затем создайте связку с ключом кампании и ID оффера. Настройки таблицы доступны внутри связки.</p><div class="actions"><a class="button" href="?page=tracker&new=1">Добавить трекер</a><a class="button secondary" href="?page=route&new=1">Создать связку</a></div></div>';
+        overviewPanel();
     }elseif(in_array($page,['tracker','partner','route'],true)){
         $all=uiEntities($page);$edit=clean($_GET['edit']??'',80);$v=$edit?($all[$edit]??[]):[];$form=isset($_GET['new'])||$edit!=='';
         if(!$form){

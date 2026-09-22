@@ -123,7 +123,7 @@ function bridgeMetaValue(h,row,names,id) {
   return values[0]||'';
 }
 function bridgeMetadata(h,row) {
-  var fields={campaign_id:['Campaign ID'],adgroup_id:['Ad Group ID','Adgroup ID','Adset ID'],ad_id:['Ad ID'],advertiser_id:['Advertiser ID'],form_id:['Form ID'],placement:['Placement'],campaign_name:['Campaign Name'],adgroup_name:['Ad Group Name','Adgroup Name','Adset Name','AID_NAME'],ad_name:['Ad Name','CID_NAME'],adid_v2:['ADID_V2'],adid_v2_name:['ADID_V2_NAME']};
+  var fields={ip:['Client IP','IP Address','IP'],campaign_id:['Campaign ID'],adgroup_id:['Ad Group ID','Adgroup ID','Adset ID'],ad_id:['Ad ID'],advertiser_id:['Advertiser ID'],form_id:['Form ID'],placement:['Placement'],campaign_name:['Campaign Name'],adgroup_name:['Ad Group Name','Adgroup Name','Adset Name','AID_NAME'],ad_name:['Ad Name','CID_NAME'],adid_v2:['ADID_V2'],adid_v2_name:['ADID_V2_NAME']};
   var out={};Object.keys(fields).forEach(function(k){var v=bridgeMetaValue(h,row,fields[k],['campaign_id','adgroup_id','ad_id','advertiser_id','form_id','adid_v2'].indexOf(k)>=0);if(v!=='')out[k]=v;});return out;
 }
 function bridgeTick() {

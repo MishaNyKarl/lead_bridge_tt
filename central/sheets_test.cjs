@@ -30,6 +30,8 @@ const extraHeaders=['PLACEMENT','CAMPAIGN_NAME','AID_NAME','CID_NAME','ADID_V2',
 rows=[headers.concat(extraHeaders),['9000000000000000005','+254700000001','Test','11','22','33','','','','','', 'TikTok','Campaign','Group','Ad','9000000000000000999','Separate']];
 e=env(rows,body=>{assert.equal(body.placement,'TikTok');assert.equal(body.campaign_name,'Campaign');assert.equal(body.adgroup_name,'Group');assert.equal(body.ad_name,'Ad');assert.equal(body.adid_v2,'9000000000000000999');assert.equal(body.adid_v2_name,'Separate');assert.notEqual(body.ad_id,body.adid_v2);return {code:202,data:{status:'processing',stage:'queued',receipt:'extra'}};});e.ctx.bridgeTick();assert.equal(rows[1][6],'QUEUED');
 assert.throws(()=>e.ctx.bridgeMetadata(['Campaign ID','CAMPAIGN_ID'],['11','22']),/Разные значения/);
+assert.equal(e.ctx.bridgeMetadata(['Client IP'],['8.8.8.8']).ip,'8.8.8.8');
+assert.equal(e.ctx.bridgeMetadata(['IP Address'],['2001:4860:4860::8888']).ip,'2001:4860:4860::8888');
 assert.throws(()=>e.ctx.bridgeMetadata(['ADID_V2'],[9000000000000000999]),/округлён/);
 console.log('PASS all optional metadata, independent V2 values, conflicting aliases and unsafe V2 ID rejected');
 

@@ -96,6 +96,17 @@ try:
  assert_ok('postback=cashfactories' in a.req('?page=partner&edit=partner_a')[1],'Cashfactories guide rendered')
  a.post(op='postback_provider',id='partner_a',postback_provider='lemonad')
  assert_ok('clickid={clickid}' in a.req('?page=partner&edit=partner_a')[1],'Lemonad guide restored')
+ # Outbound adapter settings: immutable type, owner enforcement, new account default callback.
+ assert_ok('Неизвестная' in a.post(op='save',kind='partner',name='BAD',type='invalid',token='test')[1],'outbound provider allowlist')
+ assert_ok('создайте новую' in a.post(op='save',kind='partner',id='partner_a',name='PARTNER_a',type='skylead',token='test')[1],'existing outbound type immutable')
+ for provider in ['skylead','cashfactories']:
+  a.post(op='save',kind='partner',name='OUT_'+provider,type=provider,token='test-token')
+  pid=conn.execute("SELECT id FROM entities WHERE kind='partner' AND owner='buyer_a' ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+  page=a.req('?page=partner&edit='+pid)[1]
+  assert_ok('value="'+provider+'" selected' in page and 'postback='+provider in page,'new partner adapter and callback '+provider)
+  assert_ok(b.req('?page=partner&edit='+pid)[0]==404,'new adapter ownership '+provider)
+  invalid=a.post(op='save',kind='route',name='INVALID_FLOW',tracker='tracker_a',partner=pid,campaign_key='key',offer_id='123',flow_id='')[1]
+  assert_ok('числовые ID' in invalid,'missing flow blocked '+provider)
  # Announcements are admin-published, acknowledged per user and version, never by viewing.
  banner='id="script-update-notice"'
  assert_ok('Уведомить об обновлении Apps Script' in admin.req('?page=settings')[1],'admin has script announcement controls')

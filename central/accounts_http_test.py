@@ -107,6 +107,16 @@ try:
   assert_ok(b.req('?page=partner&edit='+pid)[0]==404,'new adapter ownership '+provider)
   invalid=a.post(op='save',kind='route',name='INVALID_FLOW',tracker='tracker_a',partner=pid,campaign_key='key',offer_id='123',flow_id='')[1]
   assert_ok('числовые ID' in invalid,'missing flow blocked '+provider)
+  data=dict(op='save',kind='route',name='IP_ROUTE',tracker='tracker_a',partner=pid,campaign_key='key',offer_id='123',flow_id='456',partner_ip_mode='country_random')
+  assert_ok('Выберите страну' in a.post(**data)[1],'random IP requires country '+provider)
+  data['partner_ip_mode']='unknown'
+  assert_ok('режим IP' in a.post(**data)[1],'IP mode allowlist '+provider)
+  a.post(op='save',kind='tracker',name='IP_TEST',version='v2',click_url='https://example.invalid/click',api_key='test')
+  tid=conn.execute("SELECT id FROM entities WHERE kind='tracker' AND owner='buyer_a' ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+  data.update(partner_ip_mode='country_random',country='ZA',tracker=tid)
+  page=a.post(**data)[1]
+  assert_ok('value="country_random" selected' in page and 'value="ZA" selected' in page,'random IP mode saved '+provider)
+
  # Announcements are admin-published, acknowledged per user and version, never by viewing.
  banner='id="script-update-notice"'
  assert_ok('Уведомить об обновлении Apps Script' in admin.req('?page=settings')[1],'admin has script announcement controls')
@@ -155,8 +165,9 @@ try:
  assert_ok('Недопустимый владелец' in a.post(op='save',kind='tracker',id='',name='ATTACK',owner='buyer_b')[1],'forged owner rejected')
  assert_ok('недоступна' in a.post(op='save',kind='route',id='',name='ATTACK',tracker='tracker_b',partner='partner_a')[1],'foreign dependency rejected')
  # Creating own resources assigns the logged-in user even without an owner field.
+ own_before=conn.execute("SELECT count(*) FROM entities WHERE owner='buyer_a' AND kind='tracker'").fetchone()[0]
  a.post(op='save',kind='tracker',name='OWN_NEW',version='v1',click_url='https://example.invalid/click.php',api_key='own-key')
- assert_ok(conn.execute("SELECT count(*) FROM entities WHERE owner='buyer_a' AND kind='tracker'").fetchone()[0]==2,'new resource assigned to session owner')
+ assert_ok(conn.execute("SELECT count(*) FROM entities WHERE owner='buyer_a' AND kind='tracker'").fetchone()[0]==own_before+1,'new resource assigned to session owner')
  # Administrator manages buyer accounts, preserving an omitted password on edit.
  admin.post(op='user_save',login='buyer-c',name='Buyer c',role='buyer',password='buyer-password-123',active='on')
  c=Client();assert_ok('Вход в панель' not in c.login('buyer-c','buyer-password-123')[1],'admin-created account can log in')

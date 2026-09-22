@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.8.1';
+const BRIDGE_VERSION = '1.9.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -90,8 +90,9 @@ function enqueueUnlocked(string $routeId,array $route,array $input): array {
     if($owner&&sql('SELECT 1 FROM leads l JOIN entities e ON e.id=l.route WHERE e.owner=? AND l.external_id=? LIMIT 1',[$owner,$p['lead_id']])->fetchColumn())throw new InvalidArgumentException('Этот Lead ID уже принят в другой связке вашего аккаунта');
     if(empty($route['active']))throw new InvalidArgumentException('Связка приостановлена');
     $tracker=entity($route['tracker'],'tracker'); $partner=entity($route['partner'],'partner');
-    partnerRequest($partner,$route,$p,setting('base_url'),'preflight');
-    $snapshot=['route'=>$route,'tracker'=>$tracker,'partner'=>$partner,'base_url'=>setting('base_url')];
+    $ip=partnerIpSnapshot($partner,$route,$p);$partnerPayload=$p;if($ip['ip']!=='')$partnerPayload['ip']=$ip['ip'];
+    partnerRequest($partner,$route,$partnerPayload,setting('base_url'),'preflight');
+    $snapshot=['route'=>$route,'tracker'=>$tracker,'partner'=>$partner,'base_url'=>setting('base_url'),'partner_ip'=>$ip];
     sql('INSERT OR IGNORE INTO leads(id,route,external_id,fingerprint,state,payload,snapshot,created,updated) VALUES(?,?,?,?,?,?,?,?,?)',[$id,$routeId,$p['lead_id'],$fp,'queued',seal($p),seal($snapshot),gmdate('c'),gmdate('c')]);
     $saved=sql('SELECT * FROM leads WHERE id=?',[$id])->fetch();
     if($saved['route']!==$routeId||$saved['fingerprint']!==$fp)throw new InvalidArgumentException('Конфликт Lead ID');
@@ -148,6 +149,34 @@ function partnerApiUrl(array $partner): string {
     if(!in_array($type,['skylead','cashfactories'],true))throw new InvalidArgumentException('Неизвестная партнёрка');
     return $type==='skylead'?'https://api.skylead.biz/wm/push.json':'https://cashfactories.com/api/wm/push.json';
 }
+// Derived DB-IP IP to Country Lite subset, CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+// IP Geolocation by DB-IP: https://db-ip.com (modified range subset; see source metadata).
+function countryIpData(): array {
+    static $data;if($data!==null)return $data;
+    $encoded='__COUNTRY_IP_BASE64__';
+    $json=str_starts_with($encoded,'__')?file_get_contents(__DIR__.'/ip-country.json'):gzdecode(base64_decode($encoded,true));
+    return $data=json_decode($json,true,512,JSON_THROW_ON_ERROR);
+}
+function randomCountryIp(string $country): string {
+    $ranges=countryIpData()['countries'][$country]??[];
+    if(!$ranges)throw new InvalidArgumentException('Для выбранной страны нет диапазонов IP');
+    for($attempt=0;$attempt<100;$attempt++){
+        [$lo,$hi]=$ranges[random_int(0,count($ranges)-1)];
+        // Avoid interval edges when possible; never leave the source-country interval.
+        $ip=long2ip(random_int($lo+($hi-$lo>2?1:0),$hi-($hi-$lo>2?1:0)));
+        if(filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_IPV4|FILTER_FLAG_NO_PRIV_RANGE|FILTER_FLAG_NO_RES_RANGE)&&!preg_match('/^(0|127|22[4-9]|23[0-9])\./',$ip))return $ip;
+    }
+    throw new InvalidArgumentException('Не удалось выбрать публичный IP страны');
+}
+function partnerIpSnapshot(array $partner,array $route,array $payload): array {
+    if(($partner['type']??'lemonad')==='lemonad')return ['ip'=>'','source'=>'not_used','country'=>''];
+    if(!empty($payload['ip']))return ['ip'=>$payload['ip'],'source'=>'client','country'=>$route['country']??''];
+    if(($route['partner_ip_mode']??'client')==='country_random'){
+        $country=$route['country']??'';
+        return ['ip'=>randomCountryIp($country),'source'=>'generated','country'=>$country,'database'=>countryIpData()['release']];
+    }
+    return ['ip'=>'','source'=>'missing','country'=>$route['country']??''];
+}
 function validatePartnerLead(array $partner,array $route,array $p): void {
     partnerApiUrl($partner);
     if(($partner['type']??'lemonad')==='lemonad')return;
@@ -177,7 +206,8 @@ function processLead(string $id,?callable $http=null): void {
     try {
         $l=sql('SELECT * FROM leads WHERE id=?',[$id])->fetch(); if(!$l||!in_array($l['state'],['queued','click_ready'],true))return;
         $p=unseal($l['payload']);$s=unseal($l['snapshot']);$route=$s['route'];$t=$s['tracker'];
-        try{partnerRequest($s['partner'],$route,$p,$s['base_url'],'preflight');}catch(InvalidArgumentException $e){stage($id,'partner_review',['message'=>$e->getMessage().' Внешние запросы не выполнялись']);return;}
+        $partnerPayload=$p;if(!empty($s['partner_ip']['ip']))$partnerPayload['ip']=$s['partner_ip']['ip'];
+        try{partnerRequest($s['partner'],$route,$partnerPayload,$s['base_url'],'preflight');}catch(InvalidArgumentException $e){stage($id,'partner_review',['message'=>$e->getMessage().' Внешние запросы не выполнялись']);return;}
         if($l['state']==='queued') {
             stage($id,'binom_pending',['message'=>'Создание клика']);
             $clickResult=trackerClick($t,$route,$p,$s['base_url'],$http);$r=$clickResult['response'];$click=$clickResult['click_id'];
@@ -185,7 +215,7 @@ function processLead(string $id,?callable $http=null): void {
             stage($id,'click_ready',['click_id'=>$click,'message'=>'Клик создан','response'=>'']);$l['click_id']=$click;
         }
         stage($id,'partner_pending',['message'=>'Отправка в ПП']);
-        [$url,$body,$headers]=partnerRequest($s['partner'],$route,$p,$s['base_url'],$l['click_id']);
+        [$url,$body,$headers]=partnerRequest($s['partner'],$route,$partnerPayload,$s['base_url'],$l['click_id']);
         $r=$http($url,$body,$headers);$ref=partnerAcceptedId($s['partner'],$r);$ok=$ref!=='';
         stage($id,$ok?'sent':'partner_review',['partner_id'=>$ref,'message'=>$ok?'ПП подтвердила приём':'Приём не подтверждён. Сверьте заявку в ПП. HTTP '.$r['code'],'response'=>seal($r)]);
     } catch(Throwable $e) { $state=sql('SELECT state FROM leads WHERE id=?',[$id])->fetchColumn(); stage($id,$state==='partner_pending'?'partner_review':'binom_review',['message'=>'Обработка прервана; нужна сверка','response'=>seal(['error'=>$e->getMessage()])]); }
@@ -367,6 +397,7 @@ function mutate(): void {
             if(ownerOf($v['tracker'])!==$owner||ownerOf($v['partner'])!==$owner)throw new InvalidArgumentException('Связка, трекер и аккаунт ПП должны принадлежать одному пользователю');
             $v['campaign_key']=required($_POST,'campaign_key');$v['offer_id']=required($_POST,'offer_id');$v['active']=isset($_POST['active']);$v['partner_meta_mode']=clean($_POST['partner_meta_mode']??($old['partner_meta_mode']??'legacy'));if(!in_array($v['partner_meta_mode'],['legacy','ids','all'],true))throw new InvalidArgumentException('Некорректный режим меток ПП');
             $pp=uiEntity($v['partner'],'partner');foreach(['flow_id','country','currency'] as $field)$v[$field]=clean($_POST[$field]??($old[$field]??''),40);if(($pp['type']??'lemonad')!=='lemonad'){foreach(['offer_id','flow_id'] as $field)if(!preg_match('/^[1-9][0-9]*$/D',$v[$field]))throw new InvalidArgumentException('Укажите числовые ID оффера и потока');foreach(['country'=>2,'currency'=>3] as $field=>$len){$v[$field]=strtoupper($v[$field]);if($v[$field]!==''&&!preg_match('/^[A-Z]{'.$len.'}$/D',$v[$field]))throw new InvalidArgumentException('Некорректный '.$field);}}
+            $v['partner_ip_mode']=clean($_POST['partner_ip_mode']??($old['partner_ip_mode']??'client'));if(!in_array($v['partner_ip_mode'],['client','country_random'],true))throw new InvalidArgumentException('Некорректный режим IP');if($v['partner_ip_mode']==='country_random'){if(($pp['type']??'lemonad')==='lemonad')throw new InvalidArgumentException('Случайный IP доступен только для Skylead/Cashfactories');if(empty(countryIpData()['countries'][$v['country']]))throw new InvalidArgumentException('Выберите страну для генерации IP');}
             $v['secret']=$old['secret']??bin2hex(random_bytes(32));[$v['tokens'],$v['token_slots']]=parseMapping($_POST,$t['version']);
         }
         saveEntity($id,$kind,$v);sql('UPDATE entities SET owner=? WHERE id=?',[$owner,$id]);audit('save_'.$kind,$id);redirect('?page='.$kind.($kind==='route'?'&edit='.$id:''));
@@ -411,7 +442,7 @@ function buyerManual(): void {
     <h3>2. Подключите аккаунт партнёрки</h3>
     <p>Откройте <a href="?page=partner">Партнёрки</a> → Добавить. Укажите понятное название аккаунта и <strong>Webmaster token</strong> из профиля Lemonad. Это токен аккаунта, а не ID оффера. Сохраните. Используйте эту же запись партнёрки во всех своих связках данного аккаунта.</p>
     <p><a href="https://docs.limonad.com/doc/en-webmaster-token" target="_blank" rel="noopener noreferrer">Где взять токен Lemonad</a>.</p>
-    <p>Для Skylead/Cashfactories выберите сеть в поле «Партнёрка для отправки», вставьте API-токен из профиля и попросите менеджера активировать API. В связке укажите числовые ID оффера и потока, страну (ZA) и валюту (ZAR). Нужна колонка Client IP с реальным IP покупателя. Если Instant Form не передаёт IP, согласуйте этот случай с ПП до запуска: мост не подставляет адрес сервера. <a href="https://my.skylead.biz/help/api.php#push" target="_blank" rel="noopener noreferrer">API Skylead</a> · <a href="https://cashfactories.com/help/api.en.php#push" target="_blank" rel="noopener noreferrer">API Cashfactories</a>.</p>
+    <p>Для Skylead/Cashfactories выберите сеть в поле «Партнёрка для отправки», вставьте API-токен из профиля и попросите менеджера активировать API. В связке укажите числовые ID оффера и потока, страну (ZA) и валюту (ZAR). В связке выберите режим IP: реальный из Client IP или согласованный с ПП случайный IP страны при отсутствии реального. Для генерации обязательно выберите страну; адрес фиксируется один раз и виден в карточке лида. Действующие заявки не изменяются. <a href="https://my.skylead.biz/help/api.php#push" target="_blank" rel="noopener noreferrer">API Skylead</a> · <a href="https://cashfactories.com/help/api.en.php#push" target="_blank" rel="noopener noreferrer">API Cashfactories</a>.</p>
     <h3>3. Добавьте постбэк в партнёрке</h3>
     <p>Выберите формат своей сети в карточке партнёрки и следуйте инструкции под ссылкой. Для Skylead/Cashfactories отметьте все пять статусов; постбэк потока имеет приоритет над глобальным. Существующую доставку конверсий в Binom нужно сохранить отдельно.</p>
     <p>В сохранённой партнёрке найдите «Статусы ПП → таблица → TikTok» и нажмите <strong>Скопировать URL постбэка</strong>. В Lemonad откройте <strong>Профиль → Global postback and API → Add postback</strong>, вставьте ссылку целиком и включите все пять статусов:</p>
@@ -520,7 +551,7 @@ function panel(): void {
         else{echo '<div class="card"><h2>'.($edit?'Редактирование':'Новая запись').'</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="save"><input type="hidden" name="kind" value="'.$page.'"><input type="hidden" name="id" value="'.h($edit).'">';input('name','Название',$v['name']??'');if(isAdmin()){if(!$edit)options('owner','Владелец',accountOptions(),currentUser()['id']);else echo '<p class="muted">Владелец: '.h(accountOptions()[ownerOf($edit)]??'').'</p>';}
             if($page==='tracker'){options('version','Версия',['v1'=>'Binom v1','v2'=>'Binom v2'],$v['version']??'v1');input('click_url','Полный Click URL без параметров (например https://tracker.com/click.php)',$v['click_url']??'','url');input('api_key','API key — оставьте пустым, чтобы сохранить текущий','','password',!$edit);echo '<p class="muted">Для v1: используется clickid из ответа Click API; старый параметр binom_click_id в URL оффера также поддерживается. Для v2: обычно используется /click. Ключ для v1: Settings → API; для v2: API_KEY из Settings → Click API. Проверка связки создаёт технический клик без отправки в ПП.</p>';}
             elseif($page==='partner'){options('type','Партнёрка для отправки',postbackProviders(),$v['type']??'lemonad');echo '<p class="muted">Адрес API выбирается автоматически по партнёрке. Тип существующего аккаунта менять нельзя. Skylead/Cashfactories: токен из профиля; попросите менеджера включить отправку по API.</p>'; input('token','Токен аккаунта — пустое поле сохраняет текущий','','password',!$edit);}
-            else{echo '<p class="muted">Buyer ID определяется автоматически по логину владельца'.($edit?': <strong>'.h(buyerLogin(ownerOf($edit))).'</strong>':' после сохранения').'.</p>';options('tracker','Трекер',uiEntities('tracker'),$v['tracker']??'');options('partner','Аккаунт ПП',uiEntities('partner'),$v['partner']??'');echo '<div class="grid">';input('campaign_key','Ключ кампании Binom',$v['campaign_key']??'');input('offer_id','API ID оффера',$v['offer_id']??'');input('flow_id','ID потока Skylead / Cashfactories',$v['flow_id']??'','text',false);options('country','Страна покупателя',countryOptions($v['country']??''),$v['country']??'',false);input('currency','Валюта ISO (например ZAR)',$v['currency']??'','text',false);echo '</div>';options('partner_meta_mode','Метки Lemonad (для Skylead / Cashfactories схема фиксирована)',['legacy'=>'Как раньше: Campaign ID + Ad ID','ids'=>'Основные ID: кампания, объявление, группа и баер','all'=>'Все метки: дополнительные данные JSON в utm_term'],$v['partner_meta_mode']??'legacy');echo '<p class="muted">В ПП: utm_campaign — Campaign ID, utm_content — Ad ID, utm_source — tiktok. Расширенные режимы добавляют логин баера в utm_medium. utm_term содержит Ad Group ID либо JSON с остальными метками. Это одно поле ПП; его отображение и допустимая длина зависят от Lemonad. Skylead/Cashfactories: обязательны ID потока и Client IP в таблице; основные ID передаются в UTM, названия кампании/группы/объявления и ADID_V2/ADID_V2_NAME — в sub1–sub5, Click ID Binom — в subid, TikTok Lead ID — в uuid. IP не придумывается; согласуйте с ПП отправку Instant Forms без IP до запуска.</p>';mappingForm($v,!empty($v['tracker'])?uiEntity($v['tracker'],'tracker')['version']:'v2');echo '<label><input type="checkbox" name="active" '.(!empty($v['active'])?'checked':'').'>Связка активна'.fieldHelp('active','Связка активна').'</label>';}
+            else{echo '<p class="muted">Buyer ID определяется автоматически по логину владельца'.($edit?': <strong>'.h(buyerLogin(ownerOf($edit))).'</strong>':' после сохранения').'.</p>';options('tracker','Трекер',uiEntities('tracker'),$v['tracker']??'');options('partner','Аккаунт ПП',uiEntities('partner'),$v['partner']??'');echo '<div class="grid">';input('campaign_key','Ключ кампании Binom',$v['campaign_key']??'');input('offer_id','API ID оффера',$v['offer_id']??'');input('flow_id','ID потока Skylead / Cashfactories',$v['flow_id']??'','text',false);options('partner_ip_mode','IP для партнёрки',['client'=>'Только реальный IP из таблицы','country_random'=>'Случайный IP страны, если реального нет'],$v['partner_ip_mode']??'client');options('country','Страна покупателя',countryOptions($v['country']??''),$v['country']??'',false);input('currency','Валюта ISO (например ZAR)',$v['currency']??'','text',false);echo '</div>';options('partner_meta_mode','Метки Lemonad (для Skylead / Cashfactories схема фиксирована)',['legacy'=>'Как раньше: Campaign ID + Ad ID','ids'=>'Основные ID: кампания, объявление, группа и баер','all'=>'Все метки: дополнительные данные JSON в utm_term'],$v['partner_meta_mode']??'legacy');echo '<p class="muted">В ПП: utm_campaign — Campaign ID, utm_content — Ad ID, utm_source — tiktok. Расширенные режимы добавляют логин баера в utm_medium. utm_term содержит Ad Group ID либо JSON с остальными метками. Это одно поле ПП; его отображение и допустимая длина зависят от Lemonad. Skylead/Cashfactories: обязательны ID потока и IP — из Client IP в таблице либо выбранного режима генерации; основные ID передаются в UTM, названия кампании/группы/объявления и ADID_V2/ADID_V2_NAME — в sub1–sub5, Click ID Binom — в subid, TikTok Lead ID — в uuid. Режим случайного IP применяется по согласованию с ПП, только при отсутствии реального. Адрес фиксируется один раз при приёме заявки. Геобазы ПП могут отличаться. <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">IP Geolocation by DB-IP</a>.</p>';mappingForm($v,!empty($v['tracker'])?uiEntity($v['tracker'],'tracker')['version']:'v2');echo '<label><input type="checkbox" name="active" '.(!empty($v['active'])?'checked':'').'>Связка активна'.fieldHelp('active','Связка активна').'</label>';}
             echo '<div class="actions"><button>Сохранить</button><a href="?page='.$page.'">К списку</a></div></form></div>';
             if($page==='partner'&&$edit)postbackGuide($edit);
             if($page==='route'&&$edit){
@@ -530,7 +561,7 @@ function panel(): void {
         }
     }elseif($page==='leads'){
         $id=clean($_GET['id']??'',64);
-        if($id){$l=uiLead($id);if($l){$p=unseal($l['payload']);$s=unseal($l['snapshot']);echo '<div class="card"><h2>Лид '.h($l['external_id']).'</h2><p>'.h($s['route']['name']).' · <span class="badge">'.h($l['state']).'</span></p><pre>'.h(json_encode(['lead'=>$p,'click_id'=>$l['click_id'],'partner_reference_id'=>$l['partner_id'],'partner_status'=>result($l)['partner_status'],'partner_status_updated'=>result($l)['partner_status_updated'],'message'=>$l['message'],'campaign_key'=>$s['route']['campaign_key'],'offer_id'=>$s['route']['offer_id']],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre>';if(isAdmin()&&$l['response'])echo '<details><summary>Сохранённый ответ сервиса</summary><pre>'.h(json_encode(unseal($l['response']),JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre></details>';echo '</div>';
+        if($id){$l=uiLead($id);if($l){$p=unseal($l['payload']);$s=unseal($l['snapshot']);echo '<div class="card"><h2>Лид '.h($l['external_id']).'</h2><p>'.h($s['route']['name']).' · <span class="badge">'.h($l['state']).'</span></p><pre>'.h(json_encode(['lead'=>$p,'partner_ip'=>$s['partner_ip']??null,'click_id'=>$l['click_id'],'partner_reference_id'=>$l['partner_id'],'partner_status'=>result($l)['partner_status'],'partner_status_updated'=>result($l)['partner_status_updated'],'message'=>$l['message'],'campaign_key'=>$s['route']['campaign_key'],'offer_id'=>$s['route']['offer_id']],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre>';if(($s['partner_ip']['source']??'')==='generated')echo '<p>IP сгенерирован для ПП · <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">IP Geolocation by DB-IP</a> · CC BY 4.0</p>';if(isAdmin()&&$l['response'])echo '<details><summary>Сохранённый ответ сервиса</summary><pre>'.h(json_encode(unseal($l['response']),JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)).'</pre></details>';echo '</div>';
                 if(in_array($l['state'],['binom_review','partner_review'])){echo '<div class="card"><h2>Действие после сверки</h2><p>При таймауте сервис мог принять запрос. Сначала проверьте трекер и партнёрку.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="reconcile"><input type="hidden" name="id" value="'.h($id).'">';$choices=['sent'=>'ПП уже приняла — указать номер заявки','resume'=>'Заявки в ПП нет — отправить с проверенным clickid'];if($l['state']==='binom_review')$choices['requeue']='Клика и заявки точно нет — начать заново';options('decision','Результат проверки',$choices);input('reference','Номер заявки или проверенный clickid','','text',false);echo '<label><input type="checkbox" name="verified" value="yes" required>Я сверил результат в трекере и ПП</label><button>Применить</button></form></div>';}}
         }else{$filter=clean($_GET['state']??'',40);$offset=max(0,(int)($_GET['offset']??0));
             $owner=isAdmin()?clean($_GET['owner']??'',80):'';

@@ -27,4 +27,21 @@ foreach(['skylead'=>'https://api.skylead.biz/wm/push.json','cashfactories'=>'htt
  }
  $p['lead_id']=(string)++$n;$a=enqueue('r',$r,$p);$calls=0;processLead($a['receipt'],function()use(&$calls){$calls++;return ['code'=>200,'error'=>'','body'=>'{}'];});ck($calls===1,'invalid tracker never calls partner');
 }
+
+// Generated addresses are persisted outside the incoming payload/fingerprint.
+$partner=['type'=>'skylead','token'=>'mock'];saveEntity('p','partner',$partner);
+$r['partner_ip_mode']='country_random';$r['country']='ZA';saveEntity('r','route',$r);unset($p['ip']);$p['lead_id']='999001';
+$a=enqueue('r',$r,$p);$l=sql('SELECT * FROM leads WHERE id=?',[$a['receipt']])->fetch();$snap=unseal($l['snapshot']);$generated=$snap['partner_ip']['ip'];
+ck($snap['partner_ip']['source']==='generated'&&!isset(unseal($l['payload'])['ip']),'generated IP separately labelled; input unchanged');
+$again=enqueue('r',$r,$p);ck($again['receipt']===$a['receipt']&&unseal(sql('SELECT snapshot FROM leads WHERE id=?',[$a['receipt']])->fetchColumn())['partner_ip']['ip']===$generated,'duplicate preserves generated IP');
+$r['country']='DE';$r['partner_ip_mode']='client';saveEntity('r','route',$r);
+$sent=[];$mock=function($url,$body,$headers)use(&$sent){if(str_contains($url,'tracker.example'))return ['code'=>200,'error'=>'','body'=>'{"click_info":{"id":"generated-click"}}'];$sent[]=json_decode($body,true);return ['code'=>0,'error'=>'transport','body'=>''];};
+processLead($a['receipt'],$mock);stage($a['receipt'],'click_ready');processLead($a['receipt'],$mock);
+ck(count($sent)===2&&$sent[0]['ip']===$generated&&$sent[1]['ip']===$generated&&$sent[1]['country']==='ZA','explicit verified retry and route edit preserve snapshot IP/country');
+$client=$p;$client['ip']='8.8.8.8';$randomRoute=$r;$randomRoute['partner_ip_mode']='country_random';
+ck(partnerIpSnapshot($partner,$randomRoute,$client)['source']==='client'&&partnerIpSnapshot($partner,$randomRoute,$client)['ip']==='8.8.8.8','real customer IP takes priority');
+$randomRoute['country']='';rejects(fn()=>partnerIpSnapshot($partner,$randomRoute,$p),'generation requires country');
+$randomRoute['country']='XX';rejects(fn()=>partnerIpSnapshot($partner,$randomRoute,$p),'unknown country rejected');
+$seen=[];foreach(countryOptions() as $cc=>$label){if($cc==='')continue;for($i=0;$i<10;$i++){$ip=randomCountryIp($cc);$num=ip2long($ip);$inside=false;foreach(countryIpData()['countries'][$cc] as [$lo,$hi])if($num>=$lo&&$num<=$hi){$inside=true;break;}ck($inside&&filter_var($ip,FILTER_VALIDATE_IP,FILTER_FLAG_NO_PRIV_RANGE|FILTER_FLAG_NO_RES_RANGE),'public country range '.$cc);$seen[$ip]=true;}}
+ck(count($seen)>100,'generated addresses vary');
 }finally{foreach(glob($dir.'/*') as $f)unlink($f);rmdir($dir);}

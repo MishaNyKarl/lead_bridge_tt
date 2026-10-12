@@ -249,6 +249,16 @@ function opsProvision(array $result): array {
     catch(Throwable $e){db()->exec('ROLLBACK');throw new OpsUnavailable('Не удалось создать аккаунт; повторный вход восстановит реквизиты');}
     return $u;
 }
+function opsReturnToPanel(string $target): never {
+    // Commit a same-origin document before navigating: a 303 after a provider page
+    // still has a cross-site initiator, so browsers omit the restored Strict cookie.
+    // Targets are local application paths, never provider input or callback parameters.
+    if($target!=='?page=settings')$target=opsSafePath($target);
+    header('Content-Type: text/html; charset=utf-8');
+    $url=json_encode($target,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_THROW_ON_ERROR);
+    ?><!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Возврат в Lead Bridge</title><body><p>Вход подтверждён. Возвращаемся в Lead Bridge…</p><a id="opsvault-return" href="<?=h($target)?>">Продолжить в Lead Bridge</a><script nonce="<?=h($GLOBALS['bridge_nonce'])?>">history.replaceState(null,'',<?= $url ?>);location.replace(<?= $url ?>);</script></body></html><?php
+    exit;
+}
 function opsCallback(): never {
     $a=opsTakeAttempt();
     if(isset($_GET['iss'])&&$_GET['iss']!==OPSVAULT_ISSUER)throw new OpsDenied('Провайдер авторизации не совпадает');
@@ -264,9 +274,9 @@ function opsCallback(): never {
         session_write_close();session_id($a['panel_sid']);session_start();
         $u=currentLocalUser();if(!$u||$u['id']!==$a['uid']||$u['epoch']!==$a['epoch']||$u['password']!==$a['password_hash'])throw new OpsDenied('Локальная сессия изменилась');
         $a['kind']='pending';$a['result']=$result;unset($a['oidc']);$a['expires']=min($a['expires'],time()+300);
-        sql('INSERT INTO sso_attempts VALUES(?,?,?)',[opsBrowser(),opsSeal($a),$a['expires']]);refreshPanelSession();redirect('?page=settings');
+        sql('INSERT INTO sso_attempts VALUES(?,?,?)',[opsBrowser(),opsSeal($a),$a['expires']]);refreshPanelSession();opsReturnToPanel('?page=settings');
     }
-    $u=opsProvision($result);opsNewSession($u,$result);opsBrowserCookie('',time()-3600);redirect($a['return']);
+    $u=opsProvision($result);opsNewSession($u,$result);opsBrowserCookie('',time()-3600);opsReturnToPanel($a['return']);
 }
 function opsConfirm(): void {
     $u=requireUser();$a=opsTakeAttempt();

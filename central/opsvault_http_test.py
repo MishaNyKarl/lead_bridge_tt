@@ -81,6 +81,10 @@ class Client:
         if match: self.csrf = match[1]
         if follow and response.status == 303 and not response.headers['Location'].startswith('https://'):
             return self.req(response.headers['Location'].lstrip('/'))
+        handoff = re.search(r'id="opsvault-return" href="([^"]+)"', text)
+        if follow and response.status == 200 and handoff:
+            import html
+            return self.req(html.unescape(handoff[1]).lstrip('/'))
         return response.status, text, response.headers
     def login(self, name, password='separate-password-123'):
         self.req(); return self.req(data=dict(op='login', login=name, password=password))
@@ -201,7 +205,11 @@ try:
                 assert params['code_challenge_method'] == ['S256']
                 configure(nonce=params['nonce'][0], challenge=params['code_challenge'][0])
                 location = base + '?opsvault=callback&' + urllib.parse.urlencode(dict(code='test-code', state=params['state'][0]))
-                self.send_response(302); self.send_header('Location', location); self.send_header('Content-Length', '0'); self.end_headers()
+                # Commit an actual provider document before returning. An immediate redirect
+                # keeps the platform as the navigation initiator and masks Strict-cookie loss.
+                import html
+                body = ('<!doctype html><title>Fixture OpsVault</title><a href="' + html.escape(location, quote=True) + '">Fixture sign in</a>').encode()
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
         proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), MockProxy)
         threading.Thread(target=proxy.serve_forever, daemon=True).start()
         try:

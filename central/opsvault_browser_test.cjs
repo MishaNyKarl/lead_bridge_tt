@@ -23,6 +23,7 @@ const base = process.argv[2];
   await page.locator('form:has(input[value=ops_link_start]) input[name=ops_password]').fill('separate-password-123');
   await page.locator('input[name=vault_consent]').check();
   await page.getByRole('button', { name: 'Связать OpsVault', exact: true }).click();
+  await page.getByRole('link', { name: 'Fixture sign in', exact: true }).click();
   try { await page.getByRole('button', { name: 'Подтвердить связь', exact: true }).waitFor({ timeout: 10000 }); }
   catch (error) { console.error('Fixture callback page:', page.url(), (await page.locator('body').innerText()).slice(0,1600)); throw error; }
   assert.ok((await page.locator('main').innerText()).includes('PILOT_OPS_B'));
@@ -43,6 +44,19 @@ const base = process.argv[2];
   assert.ok((await page.locator('#buyer-help').innerText()).includes('Вход через OpsVault'));
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#buyer-help').isVisible(), false);
+  // A provider document must also preserve the session on an ordinary SSO login.
+  // With JS disabled the callback offers a same-origin continuation link.
+  const fallback = await browser.newContext({ javaScriptEnabled: false, ignoreHTTPSErrors: true,
+    proxy: { server: process.argv[5], bypass: '127.0.0.1,localhost' } });
+  const fallbackPage = await fallback.newPage();
+  await fallbackPage.goto(base);
+  await fallbackPage.getByRole('link', { name: 'Войти через OpsVault', exact: true }).click();
+  await fallbackPage.getByRole('link', { name: 'Fixture sign in', exact: true }).click();
+  await fallbackPage.getByRole('link', { name: 'Продолжить в Lead Bridge', exact: true }).click();
+  await fallbackPage.getByRole('button', { name: 'Выйти', exact: true }).waitFor();
+  assert.equal(await fallbackPage.locator('input[name=login]').count(), 0);
+  assert.ok(!fallbackPage.url().includes('opsvault=callback'));
+  await fallback.close();
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await page.getByRole('link', { name: 'Войти через OpsVault', exact: true }).waitFor();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -53,6 +67,6 @@ const base = process.argv[2];
   await page.goto(base + '?page=settings');
   await page.getByText('Подключение OpsVault', { exact: true }).waitFor();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  console.log('PASS browser: keyboard login/link/confirm, real redirects/cookies, own vault link, no password rotation, narrow screen, help/Escape, logout, no JS errors');
+  console.log('PASS browser: provider document and cross-site return, keyboard login/link/confirm, Strict cookies, ordinary SSO login without JS, own vault link, narrow screen, help/Escape, logout, no JS errors');
   await browser.close();
 })().catch(error => { console.error(error); process.exit(1); });

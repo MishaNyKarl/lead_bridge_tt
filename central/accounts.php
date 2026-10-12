@@ -34,11 +34,12 @@ function migrateAccounts(): void {
         db()->exec('COMMIT');
     }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
 }
-function currentUser(): ?array {
+function currentLocalUser(): ?array {
     if(empty($_SESSION['uid'])||time()-($_SESSION['last']??0)>=BRIDGE_SESSION_TTL)return null;
     $u=sql('SELECT * FROM users WHERE id=?',[$_SESSION['uid']])->fetch();
     return $u&&$u['active']&&hash_equals($u['epoch'],(string)($_SESSION['epoch']??''))?$u:null;
 }
+function currentUser(): ?array {$u=currentLocalUser();return $u?opsAuthorize($u,($_SERVER['REQUEST_METHOD']??'GET')==='POST'):null;}
 function requireUser(): array { $u=currentUser();if(!$u)throw new InvalidArgumentException('Войдите в панель');return $u; }
 function isAdmin(): bool {return (currentUser()['role']??'')==='admin';}
 function requireAdmin(): void {if(!isAdmin())throw new InvalidArgumentException('Действие доступно только администратору');}
@@ -96,6 +97,7 @@ function accountMutation(string $op): bool {
         setting('timezone_'.$me['id'],$zone);return true;
     }
     if($op==='password'){
+        if(opsLink($me['id']))throw new InvalidArgumentException('Пароль связанного аккаунта нельзя менять отдельно от OpsVault');
         if(!password_verify((string)($_POST['current_password']??''),$me['password']))throw new InvalidArgumentException('Неверный текущий пароль');
         $p=required($_POST,'password');if(strlen($p)<14||strlen($p)>72)throw new InvalidArgumentException('Пароль: от 14 до 72 символов');$epoch=bin2hex(random_bytes(16));
         sql('UPDATE users SET password=?,epoch=? WHERE id=?',[password_hash($p,PASSWORD_DEFAULT),$epoch,$me['id']]);$_SESSION['epoch']=$epoch;audit('password_changed',$me['id']);return true;
@@ -105,14 +107,15 @@ function accountMutation(string $op): bool {
         $login=$old['login']??strtolower(required($_POST,'login',50));if(!preg_match('/^[a-z0-9][a-z0-9_.-]{2,49}$/D',$login))throw new InvalidArgumentException('Логин: 3–50 латинских букв, цифр, _, . или -');
         $name=required($_POST,'name');$role=required($_POST,'role');if(!in_array($role,['admin','buyer'],true))throw new InvalidArgumentException('Неизвестная роль');
         $active=isset($_POST['active'])?1:0;$p=clean($_POST['password']??'');if((!$old||$p!=='')&&(strlen($p)<14||strlen($p)>72))throw new InvalidArgumentException('Пароль: от 14 до 72 символов');
-        if($id===$me['id']&&(!$active||$role!=='admin'||$p!==''))throw new InvalidArgumentException('Свои права здесь менять нельзя; пароль меняется в Настройках');
+        if($old&&opsLink($id)&&($p!==''||$role!==$old['role']))throw new InvalidArgumentException('Пароль связанного аккаунта менять нельзя; роль задаётся разрешением OpsVault');
+        if($id===$me['id']&&(!$active||$role!==($old['role']??'admin')||$p!==''))throw new InvalidArgumentException('Свои права здесь менять нельзя; пароль меняется в Настройках');
         if(sql('SELECT 1 FROM users WHERE login=? AND id<>?',[$login,$id])->fetchColumn())throw new InvalidArgumentException('Логин уже занят');
         $id=$id?:'user_'.bin2hex(random_bytes(8));$hash=$p!==''?password_hash($p,PASSWORD_DEFAULT):$old['password'];
         $epoch=(!$old||$p!==''||$old['role']!==$role||(int)$old['active']!==$active)?bin2hex(random_bytes(16)):$old['epoch'];
         sql('INSERT INTO users(id,login,name,password,role,active,epoch) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,password=excluded.password,role=excluded.role,active=excluded.active,epoch=excluded.epoch',[$id,$login,$name,$hash,$role,$active,$epoch]);audit($old?'update_user':'create_user',$id);return true;
     }
     if($op==='assign_route'){
-        requireAdmin();db()->exec('BEGIN IMMEDIATE');try{assignRoute(required($_POST,'id'),required($_POST,'owner'));db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return true;
+        requireAdmin();db()->exec('BEGIN IMMEDIATE');try{assignRoute(required($_POST,'id'),required($_POST,'owner'));opsRecheck();db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return true;
     }
     return false;
 }
@@ -120,11 +123,14 @@ function accountsPage(): void {
     requireAdmin();$id=clean($_GET['edit_user']??'',80);$u=$id?sql('SELECT id,login,name,role,active FROM users WHERE id=?',[$id])->fetch():[];
     if($id&&!$u){echo '<div class="error">Аккаунт не найден</div>';return;}
     echo '<div class="card"><h2>'.($id?'Редактирование аккаунта':'Создать аккаунт').'</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="user_save"><input type="hidden" name="id" value="'.h($id).'">';
-    if($id)echo '<p>Логин: <strong>'.h($u['login']).'</strong></p>';else input('login','Логин');
-    input('name','Имя',$u['name']??'');options('role','Роль',['buyer'=>'Баер — только свои данные','admin'=>'Администратор — все данные'],$u['role']??'buyer');
-    input('password',$id?'Новый пароль (пустое поле — оставить текущий)':'Пароль (14–72 символа)','','password',!$id);
+    if($id)echo '<p>Логин: <strong>'.h($u['login']).'</strong><br>Локальный ID: <code>'.h($id).'</code></p>';else input('login','Логин');
+    input('name','Имя',$u['name']??'');
+    if($id&&opsLink($id))echo '<input type="hidden" name="role" value="'.h($u['role']).'"><p>Роль доступа задаётся разрешением OpsVault.</p>';
+    else options('role','Роль',['buyer'=>'Баер — только свои данные','admin'=>'Администратор — все данные'],$u['role']??'buyer');
+    if(!$id||!opsLink($id))input('password',$id?'Новый пароль (пустое поле — оставить текущий)':'Пароль (14–72 символа)','','password',!$id);
+    else echo '<p>Связан с OpsVault: пароль не меняется отдельно; роль доступа задаётся в OpsVault.</p>';
     echo '<label><input type="checkbox" name="active" '.(!$id||$u['active']?'checked':'').'>Аккаунт активен</label><p class="muted">Блокировка закрывает вход и запросы таблиц. Уже принятые лиды завершают обработку. Смена пароля или роли завершает прежние сессии.</p><button>Сохранить аккаунт</button></form></div>';
     echo '<div class="card scroll"><h2>Аккаунты</h2><table><tr><th>Логин</th><th>Имя</th><th>Роль</th><th>Статус</th><th></th></tr>';
-    foreach(sql('SELECT id,login,name,role,active FROM users ORDER BY login') as $a)echo '<tr><td>'.h($a['login']).'</td><td>'.h($a['name']).'</td><td>'.($a['role']==='admin'?'Администратор':'Баер').'</td><td>'.($a['active']?'Активен':'Заблокирован').'</td><td><a href="?page=users&edit_user='.h($a['id']).'">Изменить</a></td></tr>';
+    foreach(sql('SELECT id,login,name,role,active FROM users ORDER BY login') as $a)echo '<tr><td>'.h($a['login']).'</td><td>'.h($a['name']).'</td><td>'.(opsLink($a['id'])?'Роль в OpsVault':($a['role']==='admin'?'Администратор':'Баер')).'</td><td>'.($a['active']?'Активен':'Заблокирован').'</td><td><a href="?page=users&edit_user='.h($a['id']).'">Изменить</a></td></tr>';
     echo '</table></div><div class="card"><h2>Передать существующую связку</h2><p>Связка, её лиды, трекер и аккаунт ПП станут доступны выбранному пользователю. Ключ отправки будет заменён — обновите JSON настройки в таблице.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="assign_route">';options('id','Связка',uiEntities('route'));options('owner','Новый владелец',accountOptions());echo '<button>Передать связку</button></form></div>';
 }

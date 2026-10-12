@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.12.0';
+const BRIDGE_VERSION = '1.13.1';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -53,6 +53,7 @@ function entity(string $id,string $kind): array { $v=sql('SELECT data FROM entit
 function saveEntity(string $id,string $kind,array $a): void { sql('INSERT INTO entities(id,kind,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE entities.kind=excluded.kind',[$id,$kind,seal($a)]); }
 function audit(string $event,string $id=''): void { sql('INSERT INTO audit(created,event,subject,actor) VALUES(?,?,?,?)',[gmdate('c'),$event,$id,$_SESSION['uid']??'system']); }
 require_once __DIR__.'/accounts.php'; // __ACCOUNTS_MODULE__
+require_once __DIR__.'/opsvault.php'; // __OPSVAULT_MODULE__
 require_once __DIR__.'/ui.php'; // __UI_MODULE__
 require_once __DIR__.'/overview.php'; // __OVERVIEW_MODULE__
 require_once __DIR__.'/partner_poll.php'; // __POLL_MODULE__
@@ -225,19 +226,30 @@ function processLead(string $id,?callable $http=null): void {
     $lock=fopen(home().'/lead-'.$id.'.lock','c');if(!$lock||!flock($lock,LOCK_EX|LOCK_NB))return;
     try {
         $l=sql('SELECT * FROM leads WHERE id=?',[$id])->fetch(); if(!$l||!in_array($l['state'],['queued','click_ready'],true))return;
+        // A policy outage before dispatch leaves the queue untouched; never duplicate HTTP.
+        try{opsBackground(ownerOf($l['route']));}catch(OpsDenied|OpsUnavailable $e){return;}
         $p=unseal($l['payload']);$s=unseal($l['snapshot']);$route=$s['route'];$t=$s['tracker'];
         $partnerPayload=$p;if(!empty($s['partner_ip']['ip']))$partnerPayload['ip']=$s['partner_ip']['ip'];
         try{partnerRequest($s['partner'],$route,$partnerPayload,$s['base_url'],'preflight');}catch(InvalidArgumentException $e){stage($id,'partner_review',['message'=>$e->getMessage().' Внешние запросы не выполнялись']);return;}
         if($l['state']==='queued') {
-            stage($id,'binom_pending',['message'=>'Создание клика']);
+            opsBackground(ownerOf($l['route']));stage($id,'binom_pending',['message'=>'Создание клика']);
             $clickResult=trackerClick($t,$route,$p,$s['base_url'],$http);$r=$clickResult['response'];$click=$clickResult['click_id'];
             if(!$clickResult['ok']) {stage($id,'binom_review',['message'=>'Клик не подтверждён. ПП не вызывалась. HTTP '.$r['code'],'response'=>seal($r)]);return;}
-            stage($id,'click_ready',['click_id'=>$click,'message'=>'Клик создан','response'=>'']);$l['click_id']=$click;
+            opsBackground(ownerOf($l['route']));stage($id,'click_ready',['click_id'=>$click,'message'=>'Клик создан','response'=>'']);$l['click_id']=$click;
         }
-        stage($id,'partner_pending',['message'=>'Отправка в ПП']);
+        opsBackground(ownerOf($l['route']));stage($id,'partner_pending',['message'=>'Отправка в ПП']);
         [$url,$body,$headers]=partnerRequest($s['partner'],$route,$partnerPayload,$s['base_url'],$l['click_id']);
         $r=$http($url,$body,$headers);$ref=partnerAcceptedId($s['partner'],$r);$ok=$ref!=='';
+        opsBackground(ownerOf($l['route']));
         stage($id,$ok?'sent':'partner_review',['partner_id'=>$ref,'message'=>$ok?'ПП подтвердила приём':'Приём не подтверждён. Сверьте заявку в ПП. HTTP '.$r['code'],'response'=>seal($r)]);
+    } catch(OpsDenied|OpsUnavailable $e) {
+        $state=sql('SELECT state FROM leads WHERE id=?',[$id])->fetchColumn();
+        if(in_array($state,['binom_pending','partner_pending'],true)){
+            $fields=['message'=>'Разрешение OpsVault не подтверждено после внешнего запроса; нужна сверка','response'=>seal($r??['error'=>'Policy unavailable'])];
+            if($state==='binom_pending'&&!empty($clickResult['ok']))$fields['click_id']=$clickResult['click_id'];
+            if($state==='partner_pending'&&!empty($ref))$fields['partner_id']=$ref;
+            stage($id,$state==='partner_pending'?'partner_review':'binom_review',$fields);
+        }
     } catch(Throwable $e) { $state=sql('SELECT state FROM leads WHERE id=?',[$id])->fetchColumn(); stage($id,$state==='partner_pending'?'partner_review':'binom_review',['message'=>'Обработка прервана; нужна сверка','response'=>seal(['error'=>$e->getMessage()])]); }
     finally { flock($lock,LOCK_UN);fclose($lock); }
 }
@@ -324,13 +336,14 @@ function api(): never {
         try{$r=entity($rid,'route');}catch(Throwable $e){jsonReply(['message'=>'Unauthorized'],401);}
         if(!is_string($secret)||strlen($secret)<32||!hash_equals($r['secret'],$secret))jsonReply(['message'=>'Unauthorized'],401);
         if(setting('accounts_migrated')==='1'&&!sql('SELECT 1 FROM users WHERE id=? AND active=1',[ownerOf($rid)])->fetchColumn())jsonReply(['message'=>'Account disabled'],403);
+        opsBackground(ownerOf($rid));
         if(($a['op']??'')==='check')jsonReply(['status'=>'ok','active'=>(bool)$r['active'],'route'=>$r['name'],'version'=>BRIDGE_VERSION]);
         if(($a['op']??'')==='status') {
             $ids=$a['receipts']??[];if(!is_array($ids)||count($ids)>100)throw new InvalidArgumentException('Up to 100 receipts');$out=[];
             foreach($ids as $id){$l=sql('SELECT * FROM leads WHERE id=? AND route=?',[clean($id,64),$rid])->fetch();if($l)$out[$id]=result($l);}jsonReply(['results'=>$out]);
         }
         $res=enqueue($rid,$r,$a);jsonReply($res,$res['stage']==='sent'?200:($res['status']==='review'?409:202));
-    }catch(InvalidArgumentException|JsonException $e){jsonReply(['status'=>'error','message'=>$e->getMessage()],400);}catch(Throwable $e){error_log('Bridge API: '.get_class($e));jsonReply(['status'=>'error','message'=>'Server error; retry only with the same Lead ID'],503);}
+    }catch(OpsDenied $e){jsonReply(['status'=>'error','message'=>'OpsVault access denied'],403);}catch(InvalidArgumentException|JsonException $e){jsonReply(['status'=>'error','message'=>$e->getMessage()],400);}catch(Throwable $e){error_log('Bridge API: '.get_class($e));jsonReply(['status'=>'error','message'=>'Server error; retry only with the same Lead ID'],503);}
 }
 function h(mixed $s): string {return htmlspecialchars((string)$s,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
 function csrf(): string {return '<input type="hidden" name="csrf" value="'.h($_SESSION['csrf']).'">';}
@@ -379,7 +392,7 @@ function diagnose(string $id): array {
     else {$tokens=is_array($d)?($d['campaign']['tokens']??[]):[];}
     $out=['created_at'=>gmdate('c'),'ok'=>$test['ok'],'click_id'=>$test['click_id'],'http_code'=>$test['response']['code'],'traffic_source'=>$d['click_info']['traffic_source_name']??'','tokens'=>$tokens,'sent_values'=>$p,'message'=>$test['ok']?'Клик создан. ПП не вызывалась. Сверьте метки ниже.':'Клик не подтверждён. Проверьте URL, ключ и кампанию. ПП не вызывалась.'];
     $out['mapping_checks']=mappingChecks($r,$p,$tokens,$t['version']);
-    $r['diagnostic']=$out;saveEntity($id,'route',$r);audit('test_click',$id);return $out;
+    opsRecheck();$r['diagnostic']=$out;saveEntity($id,'route',$r);audit('test_click',$id);return $out;
 }
 function routeCopyName(string $name,array $existing): string {
     $base=preg_replace('/ copy[1-9][0-9]*$/u','',$name);
@@ -393,8 +406,10 @@ function routeCopyButton(string $id,string $name): string {
 }
 function mutate(): void {
     $me=requireUser();$op=$_POST['op']??'';
+    if(opsMutation($op))return;
+    if(!empty($me['sso_migration'])&&$op!=='logout')throw new InvalidArgumentException('Сначала свяжите аккаунт с OpsVault');
     if(in_array($op,['user_save','script_notice_publish','script_notice_withdraw','script_notice_ack'],true)){
-        db()->exec('BEGIN IMMEDIATE');try{accountMutation($op);db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return;
+        db()->exec('BEGIN IMMEDIATE');try{accountMutation($op);opsRecheck();db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return;
     }
     if(accountMutation($op))return;
     if($op==='postback_provider'){
@@ -431,7 +446,7 @@ function mutate(): void {
     if($op==='duplicate'){
         $id=required($_POST,'id');db()->exec('BEGIN IMMEDIATE');
         try{$r=uiEntity($id,'route');$owner=ownerOf($id);$names=[];foreach(sql('SELECT data FROM entities WHERE kind=? AND owner=?',['route',$owner]) as $row)$names[]=unseal($row['data'])['name'];
-            $r['name']=routeCopyName($r['name'],$names);$r['secret']=bin2hex(random_bytes(32));$new='route_'.bin2hex(random_bytes(6));saveEntity($new,'route',$r);sql('UPDATE entities SET owner=? WHERE id=?',[$owner,$new]);audit('duplicate_route',$new);db()->exec('COMMIT');
+            $r['name']=routeCopyName($r['name'],$names);$r['secret']=bin2hex(random_bytes(32));$new='route_'.bin2hex(random_bytes(6));saveEntity($new,'route',$r);sql('UPDATE entities SET owner=? WHERE id=?',[$owner,$new]);audit('duplicate_route',$new);opsRecheck();db()->exec('COMMIT');
         }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}redirect('?page=route&edit='.$new);
     }
     if($op==='rotate'){$id=required($_POST,'id');$r=uiEntity($id,'route');$r['secret']=bin2hex(random_bytes(32));saveEntity($id,'route',$r);audit('rotate_secret',$id);return;}
@@ -464,6 +479,7 @@ function buyerManual(): void {
 <dialog id="buyer-help" aria-labelledby="help-title">
   <div class="help-header"><div><h2 id="help-title">Руководство баера</h2><span class="muted">От подключения трекера до первого лида</span></div><button type="button" id="help-close" class="secondary" aria-label="Закрыть руководство" autofocus>✕</button></div>
   <div class="help-content">
+    <h3>Вход через OpsVault</h3><p>«Войти через OpsVault» использует активную сессию портала в этом браузере. Для первого подключения существующего аккаунта войдите по отдельному паролю Lead Bridge, откройте Настройки → «Связать OpsVault», проверьте текущий пароль, согласитесь сохранить реквизиты и подтвердите оба аккаунта. ID и данные сохраняются. После связи оба способа входа требуют разрешения OpsVault. Отдельный пароль доступен в его хранилище и не меняется отдельно в мосте. Проверка разрешений кешируется не более чем на 60 секунд; изменения требуют свежей проверки. При недоступности провайдера действия закрываются. «Выйти» закрывает только мост; общий OIDC-выход закрывает OpsVault на этом устройстве. Фоновые задачи требуют отдельного разрешения импорта.</p>
     <p>Настройте трекер и аккаунт Lemonad один раз. Для каждой кампании создайте связку. Её можно подключить к отдельной таблице или отдельному листу общей таблицы. Логин для входа выдаёт администратор; Buyer ID определяется автоматически по владельцу связки.</p>
     <h3>1. Добавьте трекер</h3>
     <p>Откройте <a href="?page=tracker">Трекеры</a> → Добавить. Укажите название, версию Binom, полный Click URL и API key.</p>
@@ -504,21 +520,33 @@ HTML;
 }
 function panel(): void {
     startPanelSession();$_SESSION['csrf']??=bin2hex(random_bytes(24));
-    migrateAccounts();$error='';$notice='';$auth=currentUser()!==null;
+    migrateAccounts();opsSchema();$error='';$notice='';
+    try{
+        $endpoint=$_GET['opsvault']??'';
+        if($endpoint!==''){
+            if($_SERVER['REQUEST_METHOD']!=='GET')throw new OpsDenied('Некорректный метод входа');
+            if($endpoint==='login')opsBegin();elseif($endpoint==='callback')opsCallback();else throw new OpsDenied('Неизвестный маршрут входа');
+        }
+        $auth=currentUser()!==null;
+    }catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}
+    catch(Throwable $e){http_response_code(503);$error='OpsVault временно недоступен. Действия закрыты; попробуйте позже.';$auth=false;}
     if($_SERVER['REQUEST_METHOD']==='POST'){
         try {if(!hash_equals($_SESSION['csrf'],(string)($_POST['csrf']??'')))throw new InvalidArgumentException('Сессия формы истекла. Обновите страницу');
+            if(($_POST['op']??'')==='logout'){if(isset($_COOKIE['bridge_oidc'])&&is_string($_COOKIE['bridge_oidc']))sql('DELETE FROM sso_attempts WHERE browser=?',[hash('sha256',$_COOKIE['bridge_oidc'])]);opsBrowserCookie('',time()-3600);endPanelSession();redirect('?');}
             if(($_POST['op']??'')==='login'){
                 $ip=$_SERVER['REMOTE_ADDR']??'unknown';$attempt=sql('SELECT * FROM attempts WHERE ip=?',[$ip])->fetch();if($attempt&&$attempt['n']>=10&&$attempt['until_at']>time())throw new InvalidArgumentException('Слишком много попыток. Подождите 15 минут');
                 $login=strtolower(clean($_POST['login']??'',50));$user=sql('SELECT * FROM users WHERE login=?',[$login])->fetch();
                 $passwordOk=password_verify((string)($_POST['password']??''),$user['password']??'$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2uheWG/igi.');
                 if(!$user||!$user['active']||!$passwordOk){$n=($attempt&&$attempt['until_at']>time())?$attempt['n']+1:1;sql('INSERT OR REPLACE INTO attempts VALUES(?,?,?)',[$ip,$n,time()+900]);throw new InvalidArgumentException('Неверный логин или пароль');}
-                sql('DELETE FROM attempts WHERE ip=?',[$ip]);session_regenerate_id(true);$_SESSION['uid']=$user['id'];refreshPanelSession();$_SESSION['epoch']=$user['epoch'];$_SESSION['csrf']=bin2hex(random_bytes(24));audit('login');redirect('?');
+                $ops=opsPasswordSession($user);
+                sql('DELETE FROM attempts WHERE ip=?',[$ip]);session_regenerate_id(true);$_SESSION=['uid'=>$user['id'],'epoch'=>$user['epoch'],'csrf'=>bin2hex(random_bytes(24)),'ops'=>$ops];refreshPanelSession();audit('login');redirect('?');
             }
             if(!$auth)throw new InvalidArgumentException('Войдите в панель');mutate();$notice='Сохранено';
-        }catch(InvalidArgumentException $e){$error=$e->getMessage();}catch(Throwable $e){$error='Не удалось выполнить действие';error_log('Bridge panel: '.get_class($e));}
+        }catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}catch(OpsUnavailable $e){http_response_code(503);$error='OpsVault временно недоступен. Действие не выполнено.';$auth=false;}catch(InvalidArgumentException $e){$error=$e->getMessage();}catch(Throwable $e){$error='Не удалось выполнить действие';error_log('Bridge panel: '.get_class($e));}
     }
     if($auth)refreshPanelSession();
     $page=$_GET['page']??'overview';$titles=['overview'=>'Обзор','route'=>'Связки','tracker'=>'Трекеры','partner'=>'Партнёрки','leads'=>'Журнал лидов','setup'=>'Подключение','settings'=>'Настройки'];
+    if($auth&&!empty(currentUser()['sso_migration']))$page='settings';
     if($auth&&isAdmin())$titles['users']='Аккаунты';
     if($auth&&$page==='users'&&!isAdmin()){http_response_code(403);echo 'Доступ запрещён';return;}
     if(!isset($titles[$page]))$page='overview';
@@ -558,7 +586,7 @@ function panel(): void {
     .row-actions{display:flex;gap:4px;align-items:center}.copy-route-form{margin:0}.copy-route-form button.settings-link{background:transparent;border:0;box-shadow:none;margin:0;cursor:pointer}.settings-link:focus-visible{outline:2px solid #265edb;outline-offset:2px}.settings-link{display:inline-flex;padding:7px;border-radius:8px;color:#5c7191}.settings-link:hover{background:#eaf0fc;color:#265edb}.settings-link svg{width:19px;height:19px}
     .field-help{display:inline-flex;vertical-align:middle;padding:2px;margin-left:4px;background:none;color:#8293ae;border-radius:50%;line-height:1}.field-help svg{width:15px;height:15px}.field-help:hover,.field-help:focus-visible{color:#265edb;background:#eaf0fc}
     #field-tooltip{position:fixed;z-index:1000;width:min(360px,calc(100vw - 24px));padding:15px 17px;background:#152b48;color:white;border-radius:12px;font:14px/1.55 system-ui;box-shadow:0 8px 28px #15223a35;pointer-events:auto}
-    </style><?php if(!$auth):?><main class="login"><div class="card"><div class="brand">Lead <span>Bridge</span></div><p class="muted">Управление отправкой лидов</p><h1>Вход в панель</h1><?php if($error)echo '<div class="error">'.h($error).'</div>';?><form method="post"><?=csrf()?><input type="hidden" name="op" value="login"><?php input('login','Логин');input('password','Пароль','','password');?><button>Войти</button></form></div></main></html><?php return;endif;?>
+    </style><?php if(!$auth):?><main class="login"><div class="card"><div class="brand">Lead <span>Bridge</span></div><p class="muted">Управление отправкой лидов</p><h1>Вход в панель</h1><?php if($error)echo '<div class="error">'.h($error).'</div>';?><p><a class="button secondary" href="?opsvault=login">Войти через OpsVault</a></p><form method="post"><?=csrf()?><input type="hidden" name="op" value="login"><?php input('login','Логин');input('password','Отдельный пароль Lead Bridge','','password');?><button>Войти</button></form></div></main></html><?php return;endif;?>
     <aside><div class="brand">Lead <span>Bridge</span></div><div class="sub">INSTANT FORMS · CONTROL PANEL</div><nav><?php foreach($titles as $k=>$v)echo '<a class="'.($page===$k?'active':'').'" href="?page='.$k.'">'.h($v).'</a>';?></nav><div class="foot">v<?=BRIDGE_VERSION?><br>Время — <?=h(userTimezone())?></div></aside>
     <main><div class="top"><div><h1><?=h($titles[$page])?></h1><div class="muted"><?=h(currentUser()['name'])?> · <?=isAdmin()?'Администратор':'Баер'?></div></div><form method="post"><?=csrf()?><input type="hidden" name="op" value="logout"><button class="secondary">Выйти</button></form></div>
     <?php if($error)echo '<div class="error">'.h($error).'</div>';if($notice)echo '<div class="success">'.h($notice).'</div>';
@@ -610,10 +638,11 @@ function panel(): void {
     }elseif($page==='setup'){echo '<div class="card">';connectionGuide();echo '</div><div class="card"><h2>Как читать статусы</h2><p>QUEUED — сохранено на сервере; SENT — ПП подтвердила приём; REVIEW — нужна проверка; RETRY — повторно сверить заявку с тем же Lead ID. После разрыва соединения повтор с тем же ID не создаёт новую заявку.</p><p>Обязательные колонки: Lead ID (или TikTok Lead ID), Phone. Метки: Campaign ID, Ad ID, Ad Group ID, Advertiser ID, Form ID. ID и телефон должны поступать текстом.</p><p>При сортировке таблицы выполните «Пересканировать строки». Скрипт работает с добавлением строк; старые SENT не отправляются повторно.</p></div>';}
     elseif($page==='users'){accountsPage();}
     elseif($page==='settings'){
+        opsSettings();
         if(isAdmin())scriptNoticeControls();
         echo '<div class="card"><h2>Часовой пояс</h2><p class="muted">Время в журнале лидов и последних действиях отображается в выбранном часовом поясе. Настройка действует только для вашего аккаунта.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="timezone">';options('timezone','Часовой пояс',['Europe/Moscow'=>'Europe/Moscow (Москва, UTC+3)','UTC'=>'UTC (UTC+0)'],userTimezone());echo '<button>Сохранить часовой пояс</button></form></div>';
 
-        echo '<div class="card"><h2>Мой пароль</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="password">';input('current_password','Текущий пароль','','password');input('password','Новый пароль, 14–72 символа','','password');echo '<button>Изменить пароль</button></form></div>';
+        if(!opsLink(requireUser()['id'])){echo '<div class="card"><h2>Мой пароль</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="password">';input('current_password','Текущий пароль','','password');input('password','Новый пароль, 14–72 символа','','password');echo '<button>Изменить пароль</button></form></div>';}
         if(isAdmin()){echo '<div class="card"><h2>Установка</h2><p>Адрес: '.h(setting('base_url')).'</p><p class="muted">Резервные копии хранятся вне сайта. Для переноса нужны база и ключ шифрования.</p></div><div class="card scroll"><h2>Последние действия</h2><table>';foreach(sql('SELECT audit.*,coalesce(users.login,audit.actor) AS actor_login FROM audit LEFT JOIN users ON users.id=audit.actor ORDER BY audit.id DESC LIMIT 30') as $a)echo '<tr><td>'.h(displayDate($a['created'])).'</td><td>'.h($a['actor_login']).'</td><td>'.h($a['event']).'</td><td>'.h($a['subject']).'</td></tr>';echo '</table></div>';}
     }
     ?></main><div id="field-tooltip" role="tooltip" hidden></div><?php buyerManual();scriptNotice();?><script nonce="<?=h($GLOBALS['bridge_nonce'])?>">
@@ -668,7 +697,7 @@ function main(): void {
         }elseif($cmd==='migrate'){migrateAccounts();migrateBuyerLogins();echo "Accounts ready\n";}elseif($cmd==='worker'){worker(in_array('--once',$argv,true));}else{fwrite(STDERR,"Commands: init, worker [--once]\n");exit(1);}return;
     }
     $GLOBALS['bridge_nonce']=base64_encode(random_bytes(18));
-    header('Cache-Control: no-store, private');header('X-Content-Type-Options: nosniff');header('Referrer-Policy: no-referrer');header("Content-Security-Policy: default-src 'none'; script-src 'nonce-{$GLOBALS['bridge_nonce']}'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");header('X-Frame-Options: DENY');
+    header('Cache-Control: no-store, private');header('X-Content-Type-Options: nosniff');header('Referrer-Policy: no-referrer');header("Content-Security-Policy: default-src 'none'; script-src 'nonce-{$GLOBALS['bridge_nonce']}'; style-src 'unsafe-inline'; form-action 'self' https://portalwiki.world; frame-ancestors 'none'; base-uri 'none'");header('X-Frame-Options: DENY');
     if(isset($_GET['postback']))postback();
     if(isset($_GET['health']))jsonReply(['status'=>'online','version'=>BRIDGE_VERSION]);
     if($_SERVER['REQUEST_METHOD']==='POST'&&str_starts_with(strtolower($_SERVER['CONTENT_TYPE']??''),'application/json'))api();

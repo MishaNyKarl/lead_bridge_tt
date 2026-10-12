@@ -13,6 +13,7 @@ central/dist/
 *.sqlite*
 *.log
 *.lock
+!central/oidc-composer.lock
 *.pem
 *.key
 .env*

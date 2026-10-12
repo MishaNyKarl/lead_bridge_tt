@@ -1,5 +1,10 @@
 <?php
 // Presentation helpers. Database timestamps remain UTC; sorting is applied before pagination.
+function uiFavicon(): string {
+    $data='__FAVICON_BASE64__';
+    if($data==='__FAVICON'.'_BASE64__')$data=base64_encode(file_get_contents(__DIR__.'/assets/favicon.png'));
+    return '<link rel="icon" type="image/png" sizes="64x64" href="data:image/png;base64,'.$data.'">';
+}
 function userTimezone(): string {
     $user=currentUser();$zone=$user?setting('timezone_'.$user['id']):'';
     return in_array($zone,['Europe/Moscow','UTC'],true)?$zone:'Europe/Moscow';

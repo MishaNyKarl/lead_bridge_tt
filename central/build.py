@@ -23,6 +23,7 @@ source=source.replace("require_once __DIR__.'/opsvault.php'; // __OPSVAULT_MODUL
 source=source.replace("require_once __DIR__.'/partner_poll.php'; // __POLL_MODULE__",(root/'partner_poll.php').read_text(encoding='utf-8').removeprefix('<?php'))
 source=source.replace("require_once __DIR__.'/overview.php'; // __OVERVIEW_MODULE__",(root/'overview.php').read_text(encoding='utf-8').removeprefix('<?php'))
 ui=(root/'ui.php').read_text(encoding='utf-8').removeprefix('<?php')
+ui=ui.replace('__FAVICON_BASE64__',base64.b64encode((root/'assets'/'favicon.png').read_bytes()).decode('ascii'))
 for key,name in [('SETTINGS','settings'),('HELP','circle-question-mark'),('COPY','copy')]:
     ui=ui.replace('__ICON_'+key+'__',base64.b64encode((root/'icons'/(name+'.svg')).read_bytes()).decode('ascii'))
 source=source.replace("require_once __DIR__.'/ui.php'; // __UI_MODULE__",ui)

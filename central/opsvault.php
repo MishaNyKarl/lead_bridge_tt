@@ -256,7 +256,7 @@ function opsReturnToPanel(string $target): never {
     if($target!=='?page=settings')$target=opsSafePath($target);
     header('Content-Type: text/html; charset=utf-8');
     $url=json_encode($target,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_THROW_ON_ERROR);
-    ?><!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Возврат в Lead Bridge</title><body><p>Вход подтверждён. Возвращаемся в Lead Bridge…</p><a id="opsvault-return" href="<?=h($target)?>">Продолжить в Lead Bridge</a><script nonce="<?=h($GLOBALS['bridge_nonce'])?>">history.replaceState(null,'',<?= $url ?>);location.replace(<?= $url ?>);</script></body></html><?php
+    ?><!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Возврат в Lead Bridge</title><?=uiFavicon()?><body><p>Вход подтверждён. Возвращаемся в Lead Bridge…</p><a id="opsvault-return" href="<?=h($target)?>">Продолжить в Lead Bridge</a><script nonce="<?=h($GLOBALS['bridge_nonce'])?>">history.replaceState(null,'',<?= $url ?>);location.replace(<?= $url ?>);</script></body></html><?php
     exit;
 }
 function opsCallback(): never {

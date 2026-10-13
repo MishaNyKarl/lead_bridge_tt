@@ -1,6 +1,11 @@
 <?php
 // Included in the single-file distribution by build.py.
 const BRIDGE_SESSION_TTL = 30 * 86400;
+class BackgroundDenied extends RuntimeException {}
+function bridgeBackground(string $owner): void {
+    // Background integrations use local account state, independently of SSO grants.
+    if(setting('accounts_migrated')==='1'&&!sql('SELECT 1 FROM users WHERE id=? AND active=1',[$owner])->fetchColumn())throw new BackgroundDenied('Аккаунт отключён или не найден');
+}
 function startPanelSession(): void {
     // Keep application sessions out of PHP's shared directory and OS cleanup policy.
     $dir=home().'/sessions';

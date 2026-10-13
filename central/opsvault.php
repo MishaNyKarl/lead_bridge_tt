@@ -114,12 +114,6 @@ function opsPasswordSession(array $user): array {
     $s=['type'=>'local-linked','user_id'=>$user['id'],'issuer'=>OPSVAULT_ISSUER,'subject'=>$link['subject']];
     $s['cache']=opsPolicy($link,'local-linked',[],true);return $s;
 }
-function opsBackground(string $owner): void {
-    $link=opsLink($owner);if(!$link)return;
-    if(!sql('SELECT 1 FROM users WHERE id=? AND active=1',[$owner])->fetchColumn())throw new OpsDenied('Аккаунт отключён');
-    $d=opsApi('jobs/check',['subject'=>$link['subject']]);
-    if(($d['allowed']??null)!==true||!is_int($d['valid_for']??null)||$d['valid_for']<1||$d['valid_for']>60)throw new OpsDenied('Нет фонового разрешения OpsVault');
-}
 function opsLoadLibrary(): void {
     static $loaded=false;if($loaded)return;$loaded=true;
     $encoded='__OIDC_LIBRARY_BASE64__';

@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.13.2';
+const BRIDGE_VERSION = '1.13.4';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -226,26 +226,26 @@ function processLead(string $id,?callable $http=null): void {
     $lock=fopen(home().'/lead-'.$id.'.lock','c');if(!$lock||!flock($lock,LOCK_EX|LOCK_NB))return;
     try {
         $l=sql('SELECT * FROM leads WHERE id=?',[$id])->fetch(); if(!$l||!in_array($l['state'],['queued','click_ready'],true))return;
-        // A policy outage before dispatch leaves the queue untouched; never duplicate HTTP.
-        try{opsBackground(ownerOf($l['route']));}catch(OpsDenied|OpsUnavailable $e){return;}
+        // A disabled local account leaves the queue untouched; never duplicate HTTP.
+        try{bridgeBackground(ownerOf($l['route']));}catch(BackgroundDenied $e){return;}
         $p=unseal($l['payload']);$s=unseal($l['snapshot']);$route=$s['route'];$t=$s['tracker'];
         $partnerPayload=$p;if(!empty($s['partner_ip']['ip']))$partnerPayload['ip']=$s['partner_ip']['ip'];
         try{partnerRequest($s['partner'],$route,$partnerPayload,$s['base_url'],'preflight');}catch(InvalidArgumentException $e){stage($id,'partner_review',['message'=>$e->getMessage().' Внешние запросы не выполнялись']);return;}
         if($l['state']==='queued') {
-            opsBackground(ownerOf($l['route']));stage($id,'binom_pending',['message'=>'Создание клика']);
+            bridgeBackground(ownerOf($l['route']));stage($id,'binom_pending',['message'=>'Создание клика']);
             $clickResult=trackerClick($t,$route,$p,$s['base_url'],$http);$r=$clickResult['response'];$click=$clickResult['click_id'];
             if(!$clickResult['ok']) {stage($id,'binom_review',['message'=>'Клик не подтверждён. ПП не вызывалась. HTTP '.$r['code'],'response'=>seal($r)]);return;}
-            opsBackground(ownerOf($l['route']));stage($id,'click_ready',['click_id'=>$click,'message'=>'Клик создан','response'=>'']);$l['click_id']=$click;
+            bridgeBackground(ownerOf($l['route']));stage($id,'click_ready',['click_id'=>$click,'message'=>'Клик создан','response'=>'']);$l['click_id']=$click;
         }
-        opsBackground(ownerOf($l['route']));stage($id,'partner_pending',['message'=>'Отправка в ПП']);
+        bridgeBackground(ownerOf($l['route']));stage($id,'partner_pending',['message'=>'Отправка в ПП']);
         [$url,$body,$headers]=partnerRequest($s['partner'],$route,$partnerPayload,$s['base_url'],$l['click_id']);
         $r=$http($url,$body,$headers);$ref=partnerAcceptedId($s['partner'],$r);$ok=$ref!=='';
-        opsBackground(ownerOf($l['route']));
+        bridgeBackground(ownerOf($l['route']));
         stage($id,$ok?'sent':'partner_review',['partner_id'=>$ref,'message'=>$ok?'ПП подтвердила приём':'Приём не подтверждён. Сверьте заявку в ПП. HTTP '.$r['code'],'response'=>seal($r)]);
-    } catch(OpsDenied|OpsUnavailable $e) {
+    } catch(BackgroundDenied $e) {
         $state=sql('SELECT state FROM leads WHERE id=?',[$id])->fetchColumn();
         if(in_array($state,['binom_pending','partner_pending'],true)){
-            $fields=['message'=>'Разрешение OpsVault не подтверждено после внешнего запроса; нужна сверка','response'=>seal($r??['error'=>'Policy unavailable'])];
+            $fields=['message'=>'Аккаунт отключён после внешнего запроса; нужна сверка','response'=>seal($r??['error'=>'Account disabled'])];
             if($state==='binom_pending'&&!empty($clickResult['ok']))$fields['click_id']=$clickResult['click_id'];
             if($state==='partner_pending'&&!empty($ref))$fields['partner_id']=$ref;
             stage($id,$state==='partner_pending'?'partner_review':'binom_review',$fields);
@@ -335,15 +335,14 @@ function api(): never {
         $rid=clean($a['route_id']??'',80);$secret=$_SERVER['HTTP_X_BRIDGE_SECRET']??'';
         try{$r=entity($rid,'route');}catch(Throwable $e){jsonReply(['message'=>'Unauthorized'],401);}
         if(!is_string($secret)||strlen($secret)<32||!hash_equals($r['secret'],$secret))jsonReply(['message'=>'Unauthorized'],401);
-        if(setting('accounts_migrated')==='1'&&!sql('SELECT 1 FROM users WHERE id=? AND active=1',[ownerOf($rid)])->fetchColumn())jsonReply(['message'=>'Account disabled'],403);
-        opsBackground(ownerOf($rid));
+        bridgeBackground(ownerOf($rid));
         if(($a['op']??'')==='check')jsonReply(['status'=>'ok','active'=>(bool)$r['active'],'route'=>$r['name'],'version'=>BRIDGE_VERSION]);
         if(($a['op']??'')==='status') {
             $ids=$a['receipts']??[];if(!is_array($ids)||count($ids)>100)throw new InvalidArgumentException('Up to 100 receipts');$out=[];
             foreach($ids as $id){$l=sql('SELECT * FROM leads WHERE id=? AND route=?',[clean($id,64),$rid])->fetch();if($l)$out[$id]=result($l);}jsonReply(['results'=>$out]);
         }
         $res=enqueue($rid,$r,$a);jsonReply($res,$res['stage']==='sent'?200:($res['status']==='review'?409:202));
-    }catch(OpsDenied $e){jsonReply(['status'=>'error','message'=>'OpsVault access denied'],403);}catch(InvalidArgumentException|JsonException $e){jsonReply(['status'=>'error','message'=>$e->getMessage()],400);}catch(Throwable $e){error_log('Bridge API: '.get_class($e));jsonReply(['status'=>'error','message'=>'Server error; retry only with the same Lead ID'],503);}
+    }catch(BackgroundDenied $e){jsonReply(['status'=>'error','message'=>'Account disabled'],403);}catch(InvalidArgumentException|JsonException $e){jsonReply(['status'=>'error','message'=>$e->getMessage()],400);}catch(Throwable $e){error_log('Bridge API: '.get_class($e));jsonReply(['status'=>'error','message'=>'Server error; retry only with the same Lead ID'],503);}
 }
 function h(mixed $s): string {return htmlspecialchars((string)$s,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
 function csrf(): string {return '<input type="hidden" name="csrf" value="'.h($_SESSION['csrf']).'">';}

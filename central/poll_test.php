@@ -50,6 +50,17 @@ try{
  $sizes=[];for($i=0;$i<2;$i++)pollAgencyStatuses(function($url,$body)use(&$sizes){parse_str($body,$q);$ids=explode(',',$q['oid']);$sizes[]=count($ids);return responseFor($ids,'hold','batch');},15000);
  ok($sizes===[100,5],'bounded batches make progress');
  foreach(['{"status":"error","error":"key"}','<html>bad</html>','[{"uid":1.2,"id":"x","stage":"approve"}]'] as $body){try{agencyStatusRows(['code'=>200,'error'=>'','body'=>$body]);throw new LogicException('accepted invalid response');}catch(RuntimeException $e){ok(true,'reject invalid response');}}
+ // Local account state gates polling even when OpsVault is unavailable.
+ sql('INSERT INTO users VALUES(?,?,?,?,?,?,?)',['poll_owner','poll-owner','Poll owner','fixture','buyer',0,'fixture']);
+ saveEntity('r','route',['name'=>'Polling fixture']);sql('UPDATE entities SET owner=? WHERE id="r"',['poll_owner']);setting('accounts_migrated','1');
+ opsSchema();sql('INSERT INTO sso_links VALUES(?,?,?)',['poll_owner',OPSVAULT_ISSUER,'poll-subject']);setting('sso_gate','0');
+ $GLOBALS['ops_http']=function(){throw new LogicException('polling must not call OpsVault');};
+ sql('UPDATE partner_poll SET next_at=999999');sql('UPDATE partner_poll SET next_at=0 WHERE lead=?',[$big]);$reads=0;
+ $pollMock=function()use(&$reads,$big){$reads++;return responseFor([$big],'hold');};
+ pollAgencyStatuses($pollMock,16000);ok($reads===0,'disabled local owner prevents polling');
+ sql('UPDATE users SET active=1 WHERE id="poll_owner"');pollAgencyStatuses($pollMock,16000);
+ ok($reads===1,'linked active owner polls without SSO gate or import grant');
+ ok(sql('SELECT state FROM leads WHERE id=?',[$big])->fetchColumn()==='sent','local polling never resends SENT');
  ok(sql('PRAGMA integrity_check')->fetchColumn()==='ok','database integrity');
  echo "ALL POLLING TESTS PASSED\n";
 }finally{foreach(glob($dir.'/*') as $f)unlink($f);rmdir($dir);}

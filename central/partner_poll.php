@@ -36,7 +36,7 @@ function pollAgencyStatuses(?callable $http=null,?int $now=null): void {
         $s=unseal($row['snapshot']);$pp=$s['partner']??[];
         if($row['state']!=='sent'||!in_array($pp['type']??'',['skylead','cashfactories'],true)||partnerAccountType($pp)!=='agency'||!preg_match('/^[1-9][0-9]*$/D',$row['partner_id'])){sql('UPDATE partner_poll SET next_at=-1 WHERE lead=?',[$row['lead']]);continue;}
         $pid=$s['route']['partner'];
-        try{opsBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$row['lead']])->fetchColumn()));}catch(OpsDenied|OpsUnavailable $e){continue;}
+        try{bridgeBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$row['lead']])->fetchColumn()));}catch(BackgroundDenied $e){continue;}
         $key=hash('sha256',json_encode([$pid,$pp['type'],$pp['token']],JSON_THROW_ON_ERROR));
         if($group!==null&&$key!==$group)continue;
         $group=$key;$partner=$pp;$row['extu']=agencyExternalId($s['route'],$row['external_id']);
@@ -47,7 +47,7 @@ function pollAgencyStatuses(?callable $http=null,?int $now=null): void {
     if(!$batch)return;
     $ids=array_column($batch,'partner_id');$failure='';$rows=[];
     try{
-        foreach($batch as $lead)opsBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$lead['lead']])->fetchColumn()));
+        foreach($batch as $lead)bridgeBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$lead['lead']])->fetchColumn()));
         $base=$partner['type']==='skylead'?'https://api.skylead.biz':'https://cashfactories.com/api';
         $response=$http($base.'/ext/list.json?id='.rawurlencode($partner['token']),http_build_query(['oid'=>implode(',',array_unique($ids))]),['Content-Type: application/x-www-form-urlencoded']);
         $rows=agencyStatusRows($response);
@@ -60,7 +60,7 @@ function pollAgencyStatuses(?callable $http=null,?int $now=null): void {
         db()->exec('BEGIN IMMEDIATE');
         try{
             if(!$error){
-                opsBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$lead['lead']])->fetchColumn()));
+                bridgeBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$lead['lead']])->fetchColumn()));
                 $seq=(int)sql('SELECT COALESCE(MAX(id),0) FROM partner_events WHERE lead=?',[$lead['lead']])->fetchColumn();
                 if($seq!==$lead['event_seq'])$error='Статус изменился во время запроса; проверка будет повторена';
                 else try{applyPartnerStatus($lead['lead'],$map[$row['stage']],$lead['partner_id']);}catch(InvalidArgumentException $e){$error='ID заявки конфликтует с сохранённым статусом';}

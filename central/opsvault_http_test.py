@@ -14,7 +14,7 @@ define('BRIDGE_TEST',true);require $argv[1];opsSchema();
 foreach(['a','b'] as $id){
  sql('INSERT INTO users VALUES(?,?,?,?,?,?,?)',['buyer_'.$id,'local-'.$id,'LOCAL_'.$id,password_hash('separate-password-123',PASSWORD_DEFAULT),'buyer',1,'epoch_'.$id]);
  saveEntity('tracker_'.$id,'tracker',['name'=>'OWN_TRACKER_'.$id]);sql('UPDATE entities SET owner=? WHERE id=?',['buyer_'.$id,'tracker_'.$id]);
- saveEntity('route_'.$id,'route',['name'=>'MOCK_ROUTE_'.$id]);sql('UPDATE entities SET owner=? WHERE id=?',['buyer_'.$id,'route_'.$id]);
+ saveEntity('route_'.$id,'route',['name'=>'MOCK_ROUTE_'.$id,'active'=>true,'secret'=>str_repeat('a',64)]);sql('UPDATE entities SET owner=? WHERE id=?',['buyer_'.$id,'route_'.$id]);
  sql('INSERT INTO leads(id,route,external_id,fingerprint,state,payload,snapshot,created,updated) VALUES(?,?,?,?,?,?,?,?,?)',[
   'mock_lead_'.$id,'route_'.$id,'synthetic_'.$id,'fixture','sent',seal(['lead_id'=>'synthetic_'.$id,'phone'=>'+00000000000']),
   seal(['route'=>['buyer'=>'local-'.$id,'dedupe_buyer'=>'legacy_'.$id,'partner'=>'mock_partner']]),gmdate('c'),gmdate('c')]);
@@ -137,6 +137,23 @@ try:
     passed(db.execute('SELECT id,owner FROM entities ORDER BY id').fetchall() == owners, 'link preserves all entity owner IDs')
     passed(db.execute('SELECT id,route,external_id,payload,snapshot FROM leads ORDER BY id').fetchall() == lead_snapshots, 'link preserves accepted lead IDs, snapshots and legacy dedupe namespaces')
     passed(a.req(path)[0] == 403, 'callback replay refused')
+    def background(route='route_a', secret='a'*64, op='check'):
+        request=urllib.request.Request(base, data=json.dumps(dict(op=op, route_id=route, receipts=[])).encode(),
+            headers={'Content-Type':'application/json','X-Bridge-Secret':secret})
+        try: response=urllib.request.urlopen(request)
+        except urllib.error.HTTPError as error: response=error
+        return response.code, json.loads(response.read())
+    for mode in ['no-import','deny','offline']:
+        configure(mode=mode)
+        passed(background()[0] == 200 and background(op='status')[0] == 200, 'Sheets check/status independent of OpsVault '+mode)
+    dbset('sso_gate','0'); passed(background()[0] == 200, 'Sheets works with SSO gate off'); dbset('sso_gate','1')
+    passed(background(secret='b'*64)[0] == 401, 'Sheets rejects wrong route secret')
+    db.execute('UPDATE users SET active=0 WHERE id="buyer_a"'); db.commit()
+    passed(background()[0] == 403, 'Sheets rejects disabled linked local owner')
+    db.execute('UPDATE users SET active=0 WHERE id="buyer_b"'); db.commit()
+    passed(background(route='route_b')[0] == 403, 'Sheets rejects disabled unlinked local owner')
+    db.execute('UPDATE users SET active=1 WHERE id IN ("buyer_a","buyer_b")'); db.commit(); configure(mode='normal')
+
     a.req('?page=settings'); a.req(data=dict(op='logout')); passed('Вход в панель' in a.req()[1], 'local logout closes bridge')
     passed(a.login('local-a')[0] == 200, 'linked separate password login succeeds with central policy')
     code, text, _ = a.req('?page=settings'); passed('ops_logout_all' not in text and 'op" value="password' not in text, 'local-linked UI omits family logout and password rotation')

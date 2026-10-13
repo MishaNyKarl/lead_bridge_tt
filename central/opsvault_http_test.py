@@ -28,6 +28,7 @@ router.write_text('''<?php
 define('BRIDGE_TEST',true);require getenv('TEST_ARTIFACT');
 function testB64($s){return rtrim(strtr(base64_encode($s),'+/','-_'),'=');}
 $GLOBALS['ops_http']=function($url,$body,$headers){
+ file_put_contents(home().'/calls.log',parse_url($url,PHP_URL_PATH)."\\n",FILE_APPEND);
  $m=json_decode(file_get_contents(home().'/mock.json'),true);$d=$body?json_decode($body,true):[];
  $response=fn($v,$status=200)=>['code'=>$status,'body'=>json_encode($v)];
  if(str_contains($url,'openid-configuration'))return $response(['issuer'=>OPSVAULT_ISSUER,'authorization_endpoint'=>OPSVAULT_ISSUER.'/authorize/','token_endpoint'=>OPSVAULT_ISSUER.'/token/','jwks_uri'=>OPSVAULT_ISSUER.'/jwks/','code_challenge_methods_supported'=>['S256']]);
@@ -53,6 +54,9 @@ $GLOBALS['ops_http']=function($url,$body,$headers){
  if(($d['action']??'')==='logout'){$m['mode']='deny';file_put_contents(home().'/mock.json',json_encode($m));}
  return $response(['role'=>$m['role'],'valid_for'=>60]);
 };
+if(isset($_GET['fixture_expire'])){
+ startPanelSession();$lease=opsOpen($_SESSION['ops']['lease']);$lease['expires']=time()-1;$_SESSION['ops']['lease']=opsSeal($lease);echo 'expired';exit;
+}
 main();
 ''', encoding='utf8')
 mock = dict(subject='11111111-1111-4111-8111-111111111111', name='PILOT_OPS', role='user', mode='normal')
@@ -178,6 +182,23 @@ try:
     dbset('sso_gate', '1'); configure(mode='offline'); passed(a.login('local-a')[0] == 503, 'provider outage denies password login with 503')
     configure(mode='normal'); oidc = Client(); oidc.req(); _, _, headers = oidc.req('?opsvault=login', follow=False); _, (code, text, _) = oidc.callback(headers)
     passed(code == 200 and 'LOCAL_a' in text and db.execute('SELECT count(*) FROM users').fetchone()[0] == 3, 'ordinary OIDC login reuses explicit binding')
+    calls = (work / 'calls.log').read_text().splitlines()
+    passed(calls.count('/sso/.well-known/openid-configuration') >= 1, 'discovery exercised')
+    oidc.req('?fixture_expire=1')
+    code, text, headers = oidc.req('?page=settings', follow=False)
+    passed(code == 303 and headers['Location'] == '?opsvault=login&reauth=1' and 'истекла' not in text, 'expired lease redirects instead of rendering an error')
+    _, _, reauth = oidc.req('?opsvault=login&reauth=1', follow=False)
+    passed(urllib.parse.parse_qs(urllib.parse.urlsplit(reauth['Location']).query)['prompt'] == ['login'], 'expired lease opens provider with interactive login prompt')
+    before = (work / 'calls.log').read_text().count('openid-configuration')
+    _, (code, text, _) = oidc.callback(reauth)
+    passed(code == 200 and 'LOCAL_a' in text and (work / 'calls.log').read_text().count('openid-configuration') == before, 'reauth returns to same account without repeat discovery')
+    before = len((work / 'calls.log').read_text().splitlines())
+    oidc.req(data=dict(op='login', login='local-a', password='separate-password-123'))
+    passed(len((work / 'calls.log').read_text().splitlines()) == before + 1, 'password login replaces old OIDC session with one local-access call')
+    before = len((work / 'calls.log').read_text().splitlines())
+    oidc.req(data=dict(op='logout'))
+    passed(len((work / 'calls.log').read_text().splitlines()) == before, 'local logout works without provider requests')
+    _, _, headers = oidc.req('?opsvault=login', follow=False); oidc.callback(headers)
     oidc.req('?page=settings'); passed(oidc.req(data=dict(op='ops_logout_all'))[0] == 200, 'OIDC family logout closes bridge and provider family')
     passed(oidc.login('local-a')[0] == 403, 'mock revoked grant blocks subsequent separate login')
     passed(db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok', 'HTTP SSO integrity')

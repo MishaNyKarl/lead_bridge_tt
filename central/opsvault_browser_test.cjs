@@ -57,6 +57,16 @@ const base = process.argv[2];
   assert.equal(await fallbackPage.locator('input[name=login]').count(), 0);
   assert.ok(!fallbackPage.url().includes('opsvault=callback'));
   await fallback.close();
+  await page.goto(base + '?fixture_expire=1');
+  await page.goto(base + '?page=settings');
+  try { await page.getByRole('link', { name: 'Fixture sign in', exact: true }).waitFor({ timeout: 10000 }); }
+  catch (error) { console.error('Fixture reauth page:', page.url(), (await page.locator('body').innerText()).slice(0,1600)); throw error; }
+  assert.equal(new URL(page.url()).searchParams.get('prompt'), 'login');
+  await page.getByRole('link', { name: 'Fixture sign in', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('button', { name: 'Выйти', exact: true }).waitFor();
+  assert.equal(await page.locator('input[name=login]').count(), 0);
+  assert.ok(!((await page.locator('body').innerText()).includes('Сессия OpsVault истекла')));
   await page.getByRole('button', { name: 'Выйти', exact: true }).click();
   await page.getByRole('link', { name: 'Войти через OpsVault', exact: true }).waitFor();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -67,6 +77,6 @@ const base = process.argv[2];
   await page.goto(base + '?page=settings');
   await page.getByText('Подключение OpsVault', { exact: true }).waitFor();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  console.log('PASS browser: provider document and cross-site return, keyboard login/link/confirm, Strict cookies, ordinary SSO login without JS, own vault link, narrow screen, help/Escape, logout, no JS errors');
+  console.log('PASS browser: expired session opens provider login and returns, keyboard login/link/confirm, Strict cookies, SSO without JS, narrow screen, help/Escape, logout, no JS errors');
   await browser.close();
 })().catch(error => { console.error(error); process.exit(1); });

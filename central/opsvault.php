@@ -2,6 +2,7 @@
 // OpsVault 0.1.2 policy adapter. OIDC/PKCE/signatures use the pinned Jumbojett library.
 const OPSVAULT_ISSUER = 'https://portalwiki.world/sso';
 class OpsDenied extends RuntimeException {}
+class OpsLoginRequired extends OpsDenied {}
 class OpsUnavailable extends RuntimeException {}
 function opsSchema(): void {
     static $done=false;if($done)return;
@@ -73,7 +74,8 @@ function opsPolicy(array $link,string $type,array $session=[],bool $fresh=false)
     $start=microtime(true);$cache=$session['cache']??[];
     if($type==='oidc'){
         $lease=opsOpen($session['lease']??'');
-        if(($lease['subject']??'')!==$link['subject']||($lease['expires']??0)<=microtime(true))throw new OpsDenied('Сессия OpsVault истекла');
+        if(($lease['subject']??'')!==$link['subject'])throw new OpsDenied('Сессия OpsVault не подтверждена');
+        if(($lease['expires']??0)<=microtime(true))throw new OpsLoginRequired('Требуется вход в OpsVault');
     }
     if(!$fresh&&($cache['until']??0)>$start&&isset($cache['role']))return $cache;
     if($type==='oidc'){
@@ -166,18 +168,26 @@ function opsLoadLibrary(): void {
     }
 }
 class BridgeOIDCRedirect extends RuntimeException {}
-function opsClient(): object {
-    if(!opsGate())throw new OpsDenied('Вход OpsVault выключен');if(!opsReady())throw new OpsUnavailable('OpsVault ещё не настроен');
-    opsLoadLibrary();$c=new BridgeOIDC(OPSVAULT_ISSUER,setting('sso_client_id'),getenv('BRIDGE_SSO_CLIENT_SECRET'));
-    $r=opsHttp(OPSVAULT_ISSUER.'/.well-known/openid-configuration',null);if($r['code']!==200)throw new OpsUnavailable('Discovery недоступен');
-    $d=json_decode($r['body'],true,32,JSON_THROW_ON_ERROR);
+function opsDiscovery(array $d): array {
     if(($d['issuer']??'')!==OPSVAULT_ISSUER||!in_array('S256',$d['code_challenge_methods_supported']??[],true))throw new OpsUnavailable('Некорректная конфигурация OIDC');
     foreach(['authorization_endpoint','token_endpoint','jwks_uri'] as $key){if(!is_string($d[$key]??null))throw new OpsUnavailable('Некорректная конфигурация OIDC');opsOrigin($d[$key]);}
+    // OIDC defaults to Basic when omitted; supply it so the library does not refetch discovery.
+    $d['token_endpoint_auth_methods_supported']??=['client_secret_basic'];
+    return $d;
+}
+function opsClient(?array $discovery=null): object {
+    if(!opsGate())throw new OpsDenied('Вход OpsVault выключен');if(!opsReady())throw new OpsUnavailable('OpsVault ещё не настроен');
+    opsLoadLibrary();$c=new BridgeOIDC(OPSVAULT_ISSUER,setting('sso_client_id'),getenv('BRIDGE_SSO_CLIENT_SECRET'));
+    if($discovery===null){
+        $r=opsHttp(OPSVAULT_ISSUER.'/.well-known/openid-configuration',null);if($r['code']!==200)throw new OpsUnavailable('Discovery недоступен');
+        $discovery=json_decode($r['body'],true,32,JSON_THROW_ON_ERROR);
+    }
+    $d=opsDiscovery($discovery);$c->attempt['bridge_discovery']=$d;
     $c->providerConfigParam($d);$c->setRedirectURL(opsCallbackUrl());$c->setCodeChallengeMethod('S256');$c->setTokenEndpointAuthMethodsSupported(['client_secret_basic']);$c->addScope(['profile']);return $c;
 }
 function opsBrowserCookie(string $value,int $expires): void {setcookie('bridge_oidc',$value,['expires'=>$expires,'secure'=>true,'httponly'=>true,'samesite'=>'Lax','path'=>'/']);}
 function opsBrowser(): string {$v=$_COOKIE['bridge_oidc']??'';if(!is_string($v)||!preg_match('/^[a-f0-9]{64}$/D',$v))throw new OpsDenied('Попытка входа истекла');return hash('sha256',$v);}
-function opsBegin(?array $user=null,string $password=''): never {
+function opsBegin(?array $user=null,string $password='',bool $reauth=false): never {
     opsSchema();$client=opsClient();$attempt=['return'=>'/','kind'=>'attempt','expires'=>time()+300];
     if($user){
         if(opsLink($user['id'])||!in_array($user['id'],opsIds('sso_link_ids'),true))throw new OpsDenied('Аккаунт не включён в пилот связывания');
@@ -185,6 +195,7 @@ function opsBegin(?array $user=null,string $password=''): never {
         if(!password_verify($password,$user['password']))throw new InvalidArgumentException('Неверный текущий пароль');
         $attempt+=['uid'=>$user['id'],'panel_sid'=>session_id(),'epoch'=>$user['epoch'],'password_hash'=>$user['password'],'password'=>$password];
     }else $attempt['return']=opsSafePath((string)($_GET['next']??'/'));
+    if($reauth)$client->addAuthParam(['prompt'=>'login']);
     // Library uses REQUEST; do not let arbitrary query parameters switch this to callback.
     $request=$_REQUEST;$_REQUEST=[];
     try{$client->authenticate();throw new OpsUnavailable('OIDC не вернул перенаправление');}
@@ -257,7 +268,7 @@ function opsCallback(): never {
     $a=opsTakeAttempt();
     if(isset($_GET['iss'])&&$_GET['iss']!==OPSVAULT_ISSUER)throw new OpsDenied('Провайдер авторизации не совпадает');
     if(($a['kind']??'')!=='attempt'||!is_string($_GET['state']??null)||!hash_equals((string)($a['oidc']['openid_connect_state']??''),$_GET['state'])||!is_string($_GET['code']??null)||strlen($_GET['code'])>2048)throw new OpsDenied('Попытка входа не подтверждена');
-    $c=opsClient();$c->attempt=$a['oidc'];$request=$_REQUEST;$_REQUEST=['state'=>$_GET['state'],'code'=>$_GET['code']];
+    $c=opsClient($a['oidc']['bridge_discovery']??null);$c->attempt=$a['oidc'];$request=$_REQUEST;$_REQUEST=['state'=>$_GET['state'],'code'=>$_GET['code']];
     try{if(!$c->authenticate())throw new OpsDenied('OIDC не подтвердил вход');}
     catch(\Jumbojett\OpenIDConnectClientException $e){throw new OpsDenied('OIDC не подтвердил вход');}
     finally{$_REQUEST=$request;}

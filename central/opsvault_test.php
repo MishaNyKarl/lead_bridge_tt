@@ -28,9 +28,11 @@ $GLOBALS['ops_http']=function($url,$body,$headers)use(&$token,$rsa,&$role,&$mode
     return ['code'=>200,'body'=>json_encode($d)];
 };
 function clientComplete(): object {
-    $c=opsClient();$c->attempt=['openid_connect_state'=>'state','openid_connect_nonce'=>'nonce','openid_connect_code_verifier'=>'verifier'];$_REQUEST=['code'=>'code','state'=>'state'];$c->authenticate();return $c;
+    $c=opsClient();$c->attempt+=['openid_connect_state'=>'state','openid_connect_nonce'=>'nonce','openid_connect_code_verifier'=>'verifier'];$_REQUEST=['code'=>'code','state'=>'state'];$c->authenticate();return $c;
 }
 $client=clientComplete();$result=opsResult($client);ok($result['subject']===$claims['sub'],'real RS256 library verifies identity and signed sid');
+$count=count($calls);opsClient($client->attempt['bridge_discovery']);ok(count($calls)===$count,'callback reuses validated discovery without another network request');
+$badDiscovery=$client->attempt['bridge_discovery'];$badDiscovery['token_endpoint']='https://evil.test/token';denied(fn()=>opsClient($badDiscovery),'cached discovery still pins endpoint origin',OpsUnavailable::class);
 ok(!str_contains($result['lease'],'lease-token'),'lease encrypted under separate key');
 foreach(['iss'=>'https://evil.test/sso','aud'=>'other','nonce'=>'bad','exp'=>time()-1,'iat'=>time()+600,'azp'=>'other'] as $field=>$value){$token=$jwt(array_merge($claims,[$field=>$value]));denied('clientComplete','reject '.$field);}
 foreach(['nonce','exp','iat','sid'] as $field){$bad=$claims;unset($bad[$field]);$token=$jwt($bad);denied('clientComplete','mandatory '.$field);}
@@ -57,6 +59,10 @@ $mode='offline';$_SERVER['REQUEST_METHOD']='GET';$_SESSION['ops']['cache']['unti
 ok($_SESSION['ops']['cache']['until']===0,'failed check never extends cache');
 $mode='deny';denied('currentUser','revoked grant closes local-linked session',OpsDenied::class);ok(!isset($_SESSION['uid']),'session invalidated on denial');
 $mode='normal';$_SESSION=['uid'=>$user['id'],'epoch'=>'epoch','last'=>time(),'ops'=>opsPasswordSession($user)];setting('sso_gate','0');denied('currentUser','gate off denies linked password',OpsDenied::class);bridgeBackground($user['id']);ok(true,'gate off does not deny local background');setting('sso_gate','1');
+$expired=opsOpen($result['lease']);$expired['expires']=time()-1;
+$_SESSION=['uid'=>$user['id'],'epoch'=>'epoch','last'=>time(),'ops'=>['type'=>'oidc','user_id'=>$user['id'],'issuer'=>OPSVAULT_ISSUER,'subject'=>$result['subject'],'lease'=>opsSeal($expired),'cache'=>['until'=>time()+60,'role'=>'admin']]];
+$count=count($calls);denied('currentUser','expired lease requests a new login even with cached grant',OpsLoginRequired::class);ok(!isset($_SESSION['uid'])&&count($calls)===$count,'expired session closes before network access');
+$expired['subject']='other';denied(fn()=>opsPolicy(['subject'=>$result['subject']],'oidc',['lease'=>opsSeal($expired)]),'identity mismatch stays denied',OpsDenied::class);
 $mode='ttl';denied(fn()=>opsPasswordSession($user),'invalid policy ttl',OpsUnavailable::class);$mode='unknown-role';denied(fn()=>opsPasswordSession($user),'unknown role fails closed',OpsUnavailable::class);$mode='normal';
 setting('accounts_migrated','1');
 $count=count($calls);foreach(['no-import','deny','offline'] as $mode)bridgeBackground($user['id']);ok(count($calls)===$count,'background never calls OpsVault even without grant or during outage');

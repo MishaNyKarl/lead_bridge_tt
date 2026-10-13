@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.13.4';
+const BRIDGE_VERSION = '1.13.5';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -478,7 +478,7 @@ function buyerManual(): void {
 <dialog id="buyer-help" aria-labelledby="help-title">
   <div class="help-header"><div><h2 id="help-title">Руководство баера</h2><span class="muted">От подключения трекера до первого лида</span></div><button type="button" id="help-close" class="secondary" aria-label="Закрыть руководство" autofocus>✕</button></div>
   <div class="help-content">
-    <h3>Вход через OpsVault</h3><p>«Войти через OpsVault» использует активную сессию портала в этом браузере. Для первого подключения существующего аккаунта войдите по отдельному паролю Lead Bridge, откройте Настройки → «Связать OpsVault», проверьте текущий пароль, согласитесь сохранить реквизиты и подтвердите оба аккаунта. ID и данные сохраняются. После связи оба способа входа требуют разрешения OpsVault. Отдельный пароль доступен в его хранилище и не меняется отдельно в мосте. Проверка разрешений кешируется не более чем на 60 секунд; изменения требуют свежей проверки. При недоступности провайдера действия закрываются. «Выйти» закрывает только мост; общий OIDC-выход закрывает OpsVault на этом устройстве. Фоновые задачи требуют отдельного разрешения импорта.</p>
+    <h3>Вход через OpsVault</h3><p>«Войти через OpsVault» использует активную сессию портала в этом браузере. При истечении сессии панель автоматически открывает OpsVault и запрашивает вход; после авторизации вы вернётесь в свой аккаунт. Для первого подключения существующего аккаунта войдите по отдельному паролю Lead Bridge, откройте Настройки → «Связать OpsVault», проверьте текущий пароль, согласитесь сохранить реквизиты и подтвердите оба аккаунта. ID и данные сохраняются. После связи оба способа входа требуют разрешения OpsVault. Отдельный пароль доступен в его хранилище и не меняется отдельно в мосте. Проверка разрешений кешируется не более чем на 60 секунд; изменения требуют свежей проверки. При недоступности провайдера действия закрываются. «Выйти» закрывает только мост; общий OIDC-выход закрывает OpsVault на этом устройстве. Фоновые задачи требуют отдельного разрешения импорта.</p>
     <p>Настройте трекер и аккаунт Lemonad один раз. Для каждой кампании создайте связку. Её можно подключить к отдельной таблице или отдельному листу общей таблицы. Логин для входа выдаёт администратор; Buyer ID определяется автоматически по владельцу связки.</p>
     <h3>1. Добавьте трекер</h3>
     <p>Откройте <a href="?page=tracker">Трекеры</a> → Добавить. Укажите название, версию Binom, полный Click URL и API key.</p>
@@ -524,10 +524,13 @@ function panel(): void {
         $endpoint=$_GET['opsvault']??'';
         if($endpoint!==''){
             if($_SERVER['REQUEST_METHOD']!=='GET')throw new OpsDenied('Некорректный метод входа');
-            if($endpoint==='login')opsBegin();elseif($endpoint==='callback')opsCallback();else throw new OpsDenied('Неизвестный маршрут входа');
+            if($endpoint==='login')opsBegin(reauth:($_GET['reauth']??'')==='1');elseif($endpoint==='callback')opsCallback();else throw new OpsDenied('Неизвестный маршрут входа');
         }
-        $auth=currentUser()!==null;
-    }catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}
+        // Login replaces the old session; logout closes it. Neither needs its remote grant.
+        $sessionAction=$_SERVER['REQUEST_METHOD']==='POST'&&in_array($_POST['op']??'',['login','logout'],true);
+        $auth=!$sessionAction&&currentUser()!==null;
+    }catch(OpsLoginRequired $e){unset($_SESSION['uid'],$_SESSION['ops']);redirect('?opsvault=login&reauth=1');}
+    catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}
     catch(Throwable $e){http_response_code(503);$error='OpsVault временно недоступен. Действия закрыты; попробуйте позже.';$auth=false;}
     if($_SERVER['REQUEST_METHOD']==='POST'){
         try {if(!hash_equals($_SESSION['csrf'],(string)($_POST['csrf']??'')))throw new InvalidArgumentException('Сессия формы истекла. Обновите страницу');
@@ -541,7 +544,7 @@ function panel(): void {
                 sql('DELETE FROM attempts WHERE ip=?',[$ip]);session_regenerate_id(true);$_SESSION=['uid'=>$user['id'],'epoch'=>$user['epoch'],'csrf'=>bin2hex(random_bytes(24)),'ops'=>$ops];refreshPanelSession();audit('login');redirect('?');
             }
             if(!$auth)throw new InvalidArgumentException('Войдите в панель');mutate();$notice='Сохранено';
-        }catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}catch(OpsUnavailable $e){http_response_code(503);$error='OpsVault временно недоступен. Действие не выполнено.';$auth=false;}catch(InvalidArgumentException $e){$error=$e->getMessage();}catch(Throwable $e){$error='Не удалось выполнить действие';error_log('Bridge panel: '.get_class($e));}
+        }catch(OpsLoginRequired $e){unset($_SESSION['uid'],$_SESSION['ops']);redirect('?opsvault=login&reauth=1');}catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}catch(OpsUnavailable $e){http_response_code(503);$error='OpsVault временно недоступен. Действие не выполнено.';$auth=false;}catch(InvalidArgumentException $e){$error=$e->getMessage();}catch(Throwable $e){$error='Не удалось выполнить действие';error_log('Bridge panel: '.get_class($e));}
     }
     if($auth)refreshPanelSession();
     $page=$_GET['page']??'overview';$titles=['overview'=>'Обзор','route'=>'Связки','tracker'=>'Трекеры','partner'=>'Партнёрки','leads'=>'Журнал лидов','setup'=>'Подключение','settings'=>'Настройки'];

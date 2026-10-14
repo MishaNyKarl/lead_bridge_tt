@@ -1,13 +1,14 @@
 // Lead Bridge central connector. IDs must arrive as text, before TikTok writes them.
+var BRIDGE_SCRIPT_VERSION='1.13.8';
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Lead Bridge')
     .addItem('Настроить', 'bridgeConfigure')
     .addItem('Подготовить и проверить', 'bridgeSetup')
-    .addItem('Задать Form ID листа', 'bridgeConfigureForm')
     .addItem('Подключённые листы', 'bridgeConnections')
     .addItem('Включить отправку раз в минуту', 'bridgeEnable')
     .addItem('Выключить мой триггер', 'bridgeDisable')
     .addItem('Пересканировать строки', 'bridgeRescan').addToUi();
+  bridgePrepareConfiguredFutureRows();
 }
 function bridgeValidateConfig(c) {
   if (!c || !c.BRIDGE_URL || !/^https:\/\/[^\s]+$/.test(c.BRIDGE_URL) || !/^route_[a-f0-9]+$/.test(c.ROUTE_ID) || !/^[a-f0-9]{64}$/.test(c.BRIDGE_SECRET)) throw Error('Некорректные настройки');
@@ -71,53 +72,27 @@ function bridgeHeaders(sheet, prepare) {
 }
 function bridgeHeaderKey(value){return String(value).trim().toLowerCase().replace(/[ _-]/g,'');}
 function bridgeTextColumns(sheet,h) {
-  // Apply to empty cells too, before the next export. Formatting cannot repair an existing Number.
+  // Prepare only empty future rows BEFORE the next export.
+  // Sheets can convert existing numeric cells to their displayed E+ text when formatting.
+  // Never touch populated input rows or infer lost digits.
+  var last=sheet.getLastRow(),first=Math.max(2,last+1),reserve=500,max=sheet.getMaxRows();
+  if(max-last<reserve){var extra=reserve-(max-last);sheet.insertRowsAfter(max,extra);max+=extra;}
   var names=['Lead ID','TikTok Lead ID','Phone','Campaign ID','Ad ID','Ad Group ID','Adgroup ID','Adset ID','Advertiser ID','Form ID','ADID_V2','Binom Click ID','Partner Reference ID','Bridge Receipt'].map(bridgeHeaderKey);
-  var ranges=[],max=sheet.getMaxRows();h.forEach(function(name,i){
+  var ranges=[];h.forEach(function(name,i){
     if(names.indexOf(bridgeHeaderKey(name))<0)return;
     var column='',n=i+1;while(n){n--;column=String.fromCharCode(65+n%26)+column;n=Math.floor(n/26);}
-    ranges.push(column+'1:'+column+max);
+    ranges.push(column+first+':'+column+max);
   });
   if(ranges.length)sheet.getRangeList(ranges).setNumberFormat('@');
 }
 function bridgePrepareSheet(s) {
   var h=bridgeHeaders(s,true);if(!h)throw Error('На выбранном листе нужны Phone и Lead ID / TikTok Lead ID');
 }
-function bridgeSetForm(sheet,value) {
-  var id=bridgeId(value);if(!id)throw Error('Укажите полный Form ID из TikTok');
-  if(!bridgeConfig(sheet))throw Error('Сначала подключите лист через Lead Bridge → Настроить');
-  var p=PropertiesService.getScriptProperties(),key='sheet_form_id_'+sheet.getSheetId(),old=p.getProperty(key);
-  if(old&&old!==id)throw Error('Для другой формы используйте новый лист. Закреплённый Form ID нельзя переключать');
-  var h=bridgeHeaders(sheet,false);h.forEach(function(header,column){
-    if(bridgeHeaderKey(header)!=='formid'||sheet.getLastRow()<2)return;
-    sheet.getRange(2,column+1,sheet.getLastRow()-1,1).getValues().forEach(function(row){
-      var raw=row[0];if(typeof raw==='string'&&/^\d{1,40}$/.test(raw.trim())&&raw.trim()!==id)throw Error('На листе есть другой точный Form ID. Проверьте форму; настройка не сохранена');
-    });
-  });
-  p.setProperty(key,id);
-}
-function bridgeConfigureForm() {
-  var ui=SpreadsheetApp.getUi(),s=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  var result=ui.prompt('Form ID листа «'+s.getName()+'»','Вставьте полный Form ID из TikTok, не число в E+. Только одна форма на лист: это значение будет передаваться для новых заявок и заменять повреждённый Form ID. Старые SENT не меняются.',ui.ButtonSet.OK_CANCEL);
-  if(result.getSelectedButton()!==ui.Button.OK)return;
-  var lock=LockService.getScriptLock();lock.waitLock(10000);
-  try{bridgeSetForm(s,result.getResponseText().trim());}finally{lock.releaseLock();}
-  ui.alert('Form ID закреплён за этим листом. Для строк без квитанции после проверки данных можно поставить RETRY. SENT повторно не отправляются.');
-}
-function bridgeApplyForm(sheet,h,row,rowNum) {
-  var id=PropertiesService.getScriptProperties().getProperty('sheet_form_id_'+sheet.getSheetId());if(!id)return '';
-  id=bridgeId(id);var changes=[];h.forEach(function(header,index){
-    if(bridgeHeaderKey(header)!=='formid')return;
-    var raw=row[index];
-    if(typeof raw==='string'&&/^\d{1,40}$/.test(raw.trim())&&raw.trim()!==id)throw Error('Form ID не совпадает с закреплённой формой листа');
-    if(typeof raw==='number'&&Number.isSafeInteger(raw)&&String(raw)!==id)throw Error('Form ID не совпадает с закреплённой формой листа');
-    if(raw!==''&&raw!==null&&raw!==undefined&&typeof raw!=='number'&&typeof raw!=='string')throw Error('Некорректный тип Form ID');
-    if(typeof raw==='string'&&raw.trim()&&!/^\d{1,40}$/.test(raw.trim())&&!/^\d+(?:[.,]\d+)?[eE]\+?\d+$/.test(raw.trim()))throw Error('Некорректный Form ID: проверьте запись из TikTok');
-    if(typeof raw==='number'&&(!Number.isFinite(raw)||raw<0||!Number.isInteger(raw)))throw Error('Некорректный Form ID: проверьте запись из TikTok');
-    if(raw!==id)changes.push(index);
-  });
-  changes.forEach(function(index){sheet.getRange(rowNum,index+1).setNumberFormat('@').setValue(id);row[index]=id;});
-  return id;
+function bridgePrepareConfiguredFutureRows() {
+  var lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
+  try {SpreadsheetApp.getActiveSpreadsheet().getSheets().forEach(function(sheet){
+    try {if(bridgeConfig(sheet))bridgePrepareSheet(sheet);}catch(error){console.error('Lead Bridge: подготовка листа '+sheet.getSheetId()+': '+error.message);}
+  });SpreadsheetApp.flush();}finally{lock.releaseLock();}
 }
 function bridgeSetup() {
   var s=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(),lock=LockService.getScriptLock();lock.waitLock(10000);
@@ -129,12 +104,12 @@ function bridgeSetup() {
     if(r.code!==200 || r.data.status!=='ok')throw Error('Ошибка подключения');
     bridgePrepareSheet(s);SpreadsheetApp.flush();
   } finally {lock.releaseLock();}
-  SpreadsheetApp.getUi().alert('Лист «'+s.getName()+'» подготовлен. Связка '+(r.data.active?'активна':'на паузе')+'. Лиды не отправлялись. Остальные листы настраиваются отдельно; триггер общий.');
+  SpreadsheetApp.getUi().alert('Лист «'+s.getName()+'» подготовлен. Apps Script '+BRIDGE_SCRIPT_VERSION+'. Связка '+(r.data.active?'активна':'на паузе')+'. Лиды не отправлялись. Остальные листы настраиваются отдельно; триггер общий.');
 }
 function bridgeConnections() {
   var lock=LockService.getScriptLock();lock.waitLock(10000);var lines;
   try {bridgeMigrateSheets();lines=SpreadsheetApp.getActiveSpreadsheet().getSheets().map(function(s){var c=bridgeConfig(s);return s.getName()+' → '+(c?c.ROUTE_ID:'не подключён');});} finally {lock.releaseLock();}
-  SpreadsheetApp.getUi().alert('Подключённые листы',lines.join('\n'),SpreadsheetApp.getUi().ButtonSet.OK);
+  SpreadsheetApp.getUi().alert('Подключённые листы · Apps Script '+BRIDGE_SCRIPT_VERSION,lines.join('\n'),SpreadsheetApp.getUi().ButtonSet.OK);
 }
 function bridgeDisable() {ScriptApp.getProjectTriggers().forEach(function(t){if(t.getHandlerFunction()==='bridgeTick')ScriptApp.deleteTrigger(t);});}
 function bridgeEnable() {
@@ -191,7 +166,7 @@ function bridgeTick() {
       try {
       // Unconfigured copies never inherit the route of their source tab.
       var c=bridgeConfig(s);if(!c)continue;
-      var h=bridgeHeaders(s,true);if(!h||s.getLastRow()<2)continue;
+      var h=bridgeHeaders(s,true);if(!h)continue;SpreadsheetApp.flush();if(s.getLastRow()<2)continue;
       if(h.indexOf('TikTok Lead Status')>=0){try{bridgeSyncPartnerStatuses(c,s,h,p);}catch(syncError){console.error('Статусы ПП: '+syncError.message);}}
       var statusCol=h.indexOf('Webhook_Status')+1, receiptCol=h.indexOf('Bridge Receipt')+1;
       // Read a single status column to recover unfinished rows without rereading every lead's PII.
@@ -222,8 +197,7 @@ function bridgeTick() {
           else {
             var a=bridgeId(val('Lead ID')),b=bridgeId(val('TikTok Lead ID'));if(a&&b&&a!==b)throw Error('Колонки Lead ID расходятся');if(!a&&!b)continue;
             var body={lead_id:a||b,name:String(val('Name')||'Customer'),phone:bridgePhone(val('Phone'))};
-            var form=bridgeApplyForm(s,h,row,rowNum);
-            var metadata=bridgeMetadata(h,row);if(form)metadata.form_id=form;Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
+            var metadata=bridgeMetadata(h,row);Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
             write('Webhook_Status','PROCESSING');SpreadsheetApp.flush();
             var r=bridgeFetch(c,body);
             if([200,202,409].indexOf(r.code)<0)throw Error(r.data.message||'HTTP '+r.code);

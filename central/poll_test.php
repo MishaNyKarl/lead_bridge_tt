@@ -50,6 +50,27 @@ try{
  $sizes=[];for($i=0;$i<2;$i++)pollAgencyStatuses(function($url,$body)use(&$sizes){parse_str($body,$q);$ids=explode(',',$q['oid']);$sizes[]=count($ids);return responseFor($ids,'hold','batch');},15000);
  ok($sizes===[100,5],'bounded batches make progress');
  foreach(['{"status":"error","error":"key"}','<html>bad</html>','[{"uid":1.2,"id":"x","stage":"approve"}]'] as $body){try{agencyStatusRows(['code'=>200,'error'=>'','body'=>$body]);throw new LogicException('accepted invalid response');}catch(RuntimeException $e){ok(true,'reject invalid response');}}
+ // Offerstore uses its own endpoint and immutable credentials, isolated from other networks.
+ sql('UPDATE partner_poll SET next_at=999999');
+ $offerBig='987654321098765432109';fixture($offerBig,'offer','offerstore');fixture('901','offer-wm','offerstore','webmaster');
+ saveEntity('offer','partner',['type'=>'offerstore','account_type'=>'webmaster','token'=>'changed']);
+ $offerSnapshot=sql('SELECT snapshot FROM leads WHERE id=?',[$offerBig])->fetchColumn();
+ $offerReads=0;
+ foreach(['wait'=>'new','hold'=>'hold','approve'=>'approved','cancel'=>'rejected','trash'=>'trash'] as $raw=>$expected){
+  sql('UPDATE partner_poll SET next_at=0 WHERE lead=?',[$offerBig]);
+  pollAgencyStatuses(function($url,$body,$headers)use($offerBig,$raw,&$offerReads){
+   $offerReads++;parse_str($body,$params);
+   ok($url==='https://api.offer.store/ext/list.json?id=snapshot-token'&&$params['oid']===$offerBig,'Offerstore polls snapshot token and exact internal ID');
+   return responseFor([$offerBig],$raw,'offer');
+  },20000);
+  ok(sql('SELECT status FROM partner_status WHERE lead=?',[$offerBig])->fetchColumn()===$expected,'Offerstore API status '.$raw);
+ }
+ ok(sql("SELECT next_at FROM partner_poll WHERE lead='901'")->fetchColumn()===-1,'Offerstore webmaster excluded from polling');
+ sql('UPDATE partner_poll SET next_at=0 WHERE lead=?',[$offerBig]);
+ pollAgencyStatuses(fn()=>responseFor([$offerBig],'approve','foreign'),21000);
+ ok(sql('SELECT status FROM partner_status WHERE lead=?',[$offerBig])->fetchColumn()==='trash','Offerstore foreign external ID ignored');
+ ok(sql('SELECT snapshot FROM leads WHERE id=?',[$offerBig])->fetchColumn()===$offerSnapshot,'Offerstore poll never changes snapshot');
+ ok(sql('SELECT state FROM leads WHERE id=?',[$offerBig])->fetchColumn()==='sent'&&$offerReads===5,'Offerstore polling never resends');
  // Local account state gates polling even when OpsVault is unavailable.
  sql('INSERT INTO users VALUES(?,?,?,?,?,?,?)',['poll_owner','poll-owner','Poll owner','fixture','buyer',0,'fixture']);
  saveEntity('r','route',['name'=>'Polling fixture']);sql('UPDATE entities SET owner=? WHERE id="r"',['poll_owner']);setting('accounts_migrated','1');

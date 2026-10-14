@@ -52,6 +52,16 @@ foreach(['hold'=>'hold','approve'=>'approved','cancel'=>'rejected','trash'=>'tra
 $cash=array_replace($sky,['postback'=>'cashfactories','status'=>'approve']);
 ok(receivePostback($cash)['applied'],'Cashfactories uses same mapping');
 ok(receivePostback($cash)['duplicate'],'Cashfactories duplicate idempotent');
+sql("INSERT INTO leads(id,route,external_id,fingerprint,state,payload,snapshot,click_id,created,updated) VALUES('l-offer','r','offer-test','f','sent','',?,'offer-click','now','now')",[seal($base)]);
+$offer=array_replace($sky,['postback'=>'offerstore','clickid'=>'offer-click']);
+foreach(['wait'=>'new','hold'=>'hold','approve'=>'approved','cancel'=>'rejected','trash'=>'trash'] as $raw=>$expected){
+    receivePostback(array_replace($offer,['status'=>$raw]));
+    ok(sql("SELECT status FROM partner_status WHERE lead='l-offer'")->fetchColumn()===$expected,'Offerstore maps '.$raw);
+}
+ok(!receivePostback(array_replace($offer,['status'=>'wait']))['applied'],'Offerstore late wait cannot undo decision');
+ok(receivePostback(array_replace($offer,['status'=>'trash']))['duplicate'],'Offerstore duplicate idempotent');
+ok(receivePostback(array_replace($offer,['clickid'=>'foreign-click','status'=>'approve']))['status']==='ignored','Offerstore foreign lead ignored');
+try{receivePostback(array_replace($offer,['status'=>'unknown']));throw new RuntimeException('unknown Offerstore stage accepted');}catch(InvalidArgumentException $e){ok(true,'unknown Offerstore stage rejected');}
 try{receivePostback(array_replace($sky,['status'=>'unknown']));throw new RuntimeException('unknown stage accepted');}catch(InvalidArgumentException $e){ok(true,'unknown Skylead stage rejected');}
 try{receivePostback(array_replace($sky,['postback'=>'lemonad','status'=>'hold']));throw new RuntimeException('Lemonad accepted hold');}catch(InvalidArgumentException $e){ok(true,'Lemonad status rules unchanged');}
 ok(sql("SELECT snapshot FROM leads WHERE id='l2'")->fetchColumn()===$before,'postback leaves snapshot unchanged');
@@ -60,3 +70,5 @@ setting('base_url','https://bridge.example.com');
 ok(str_contains(partnerPostbackUrl('p1','skylead'),'clickid={subid}&status={stage}&leadid={id}'),'Skylead macros exact');
 ok(str_contains(partnerPostbackUrl('p1','cashfactories'),'postback=cashfactories'),'Cashfactories URL selector');
 ok(str_contains(partnerPostbackUrl('p1','lemonad'),'clickid={clickid}&status={status}&leadid={leadid}'),'Lemonad URL unchanged');
+
+ok(str_contains(partnerPostbackUrl('p1','offerstore'),'postback=offerstore')&&str_contains(partnerPostbackUrl('p1','offerstore'),'clickid={subid}&status={stage}&leadid={id}'),'Offerstore URL and macros exact');

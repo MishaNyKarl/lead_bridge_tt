@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.13.9';
+const BRIDGE_VERSION = '1.14.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -131,27 +131,30 @@ function trackerClick(array $t,array $route,array $p,string $base,?callable $htt
     $params=array_merge($tokens,['key'=>$route['campaign_key'],'api_key'=>$t['api_key']]);
     if($t['version']==='v1') {
         $params['lp_type']='click_info';$params['__capiurl']=$base.'/action.php';
-        $body=http_build_query(['ClickDataHeaders'=>json_encode(['HTTP_USER_AGENT'=>'LeadBridge/1.0 InstantForm','HTTP_CONTENT_TYPE'=>'application/json'])]);
+        $body=http_build_query(['ClickDataHeaders'=>json_encode(['HTTP_USER_AGENT'=>'LeadBridge/1.0','HTTP_CONTENT_TYPE'=>'application/json'])]);
         $headers=['Content-Type: application/x-www-form-urlencoded'];
-    }elseif($t['version']==='v2'){$params['lpbcid']='1';$body=null;$headers=['User-Agent: LeadBridge/1.0 InstantForm','Accept: application/json'];}
+    }elseif($t['version']==='v2'){$params['lpbcid']='1';$body=null;$headers=['User-Agent: LeadBridge/1.0','Accept: application/json'];}
     else throw new RuntimeException('Unknown tracker adapter');
     $r=$http($t['click_url'].'?'.http_build_query($params),$body,$headers);$d=json_decode($r['body'],true,512,JSON_BIGINT_AS_STRING);$click='';
     $click=is_array($d)?extractClickId($d,$t['version']):'';
     $ok=!$r['error']&&$r['code']===200&&is_string($click)&&preg_match('/^[a-zA-Z0-9_-]{1,200}$/D',$click)&&empty($d['error'])&&empty($d['errors'])&&($d['status']??'')!=='error';
     return ['ok'=>(bool)$ok,'click_id'=>$ok?$click:'','response'=>$r];
 }
+function partnerAttributionId(array $route,string $field,string $value): string {
+    if($value==='')return '';
+    // Keyed, separated aliases preserve grouping without disclosing source IDs/names.
+    return hash_hmac('sha256',json_encode(['partner-attribution-v1',$route['dedupe_buyer']??$route['buyer'],$field,$value],JSON_THROW_ON_ERROR),file_get_contents(home().'/master.key'));
+}
 function partnerLeadBody(array $route,array $p,string $base,string $click): array {
-    $body=['offerId'=>$route['offer_id'],'name'=>$p['name'],'phone'=>$p['phone'],'domain'=>parse_url($base,PHP_URL_HOST),'clickid'=>$click,'utm_campaign'=>$p['campaign_id']??'','utm_content'=>$p['ad_id']??'','utm_source'=>'tiktok'];
-    $mode=$route['partner_meta_mode']??'legacy';
-    if($mode!=='legacy'){
-        $body['utm_medium']=$route['buyer'];
-        if($mode==='all'){
-            $extra=[];foreach(tokenLabels() as $field=>$label)if(!in_array($field,['campaign_id','ad_id'],true)&&isset($p[$field])&&$p[$field]!=='')$extra[$field]=$p[$field];
-            if($extra)$body['utm_term']=json_encode($extra,JSON_THROW_ON_ERROR|JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
-        }elseif(!empty($p['adgroup_id']))$body['utm_term']=$p['adgroup_id'];
+    $body=['offerId'=>$route['offer_id'],'name'=>$p['name'],'phone'=>$p['phone'],'clickid'=>$click,'utm_source'=>'tiktok','utm_campaign'=>partnerAttributionId($route,'campaign',$p['campaign_id']??''),'utm_content'=>partnerAttributionId($route,'ad',$p['ad_id']??'')];
+    if(($route['partner_meta_mode']??'legacy')!=='legacy'){
+        $body['utm_medium']=partnerAttributionId($route,'buyer',$route['buyer']);
+        $body['utm_term']=partnerAttributionId($route,'adgroup',$p['adgroup_id']??'');
     }
+    // Legacy "all" snapshots also use aliases: never export placement/form IDs or names.
     return $body;
 }
+
 function partnerAccountType(array $partner): string {
     if(($partner['type']??'lemonad')==='lemonad')return 'webmaster';
     $mode=$partner['account_type']??'webmaster';
@@ -159,12 +162,19 @@ function partnerAccountType(array $partner): string {
     return $mode;
 }
 function partnerRouteFields(array $partner): array {return partnerAccountType($partner)==='agency'?['offer_id']:['offer_id','flow_id'];}
+function partnerApiBase(string $type): string {
+    return match($type){
+        'skylead'=>'https://api.skylead.biz',
+        'cashfactories'=>'https://cashfactories.com/api',
+        'offerstore'=>'https://api.offer.store',
+        default=>throw new InvalidArgumentException('Неизвестная партнёрка'),
+    };
+}
 function partnerApiUrl(array $partner): string {
     $type=$partner['type']??'lemonad';
     if($type==='lemonad')return 'https://sendmelead.com/api/v3/lead/add';
-    if(!in_array($type,['skylead','cashfactories'],true))throw new InvalidArgumentException('Неизвестная партнёрка');
     $path=partnerAccountType($partner)==='agency'?'/ext/add.json':'/wm/push.json';
-    return ($type==='skylead'?'https://api.skylead.biz':'https://cashfactories.com/api').$path;
+    return partnerApiBase($type).$path;
 }
 // Derived DB-IP IP to Country Lite subset, CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
 // IP Geolocation by DB-IP: https://db-ip.com (modified range subset; see source metadata).
@@ -203,15 +213,13 @@ function validatePartnerLead(array $partner,array $route,array $p): void {
 function partnerRequest(array $partner,array $route,array $p,string $base,string $click): array {
     validatePartnerLead($partner,$route,$p);$url=partnerApiUrl($partner);
     if(($partner['type']??'lemonad')==='lemonad')return [$url,json_encode(partnerLeadBody($route,$p,$base,$click),JSON_THROW_ON_ERROR),['Content-Type: application/json','X-Token: '.$partner['token']]];
-    $body=['offer'=>$route['offer_id'],'ip'=>$p['ip'],'name'=>$p['name'],'phone'=>ltrim($p['phone'],'+'),'subid'=>$click,'uuid'=>$p['lead_id'],'utm_source'=>'tiktok','utm_campaign'=>$p['campaign_id']??'','utm_content'=>$p['ad_id']??'','utm_term'=>$p['adgroup_id']??'','utm_medium'=>$route['buyer']];
+    // Explicit allowlist: TikTok is allowed; raw IDs and descriptive names stay internal.
+    $body=['offer'=>$route['offer_id'],'ip'=>$p['ip'],'name'=>$p['name'],'phone'=>ltrim($p['phone'],'+'),'subid'=>$click,'utm_source'=>'tiktok','utm_campaign'=>partnerAttributionId($route,'campaign',$p['campaign_id']??''),'utm_content'=>partnerAttributionId($route,'ad',$p['ad_id']??''),'utm_term'=>partnerAttributionId($route,'adgroup',$p['adgroup_id']??''),'utm_medium'=>partnerAttributionId($route,'buyer',$route['buyer']),'uuid'=>partnerAttributionId($route,'lead',$p['lead_id'])];
     if(partnerAccountType($partner)==='agency'){
         $body['extu']=agencyExternalId($route,$p['lead_id']);
-        $body['exts']=$route['buyer'];
+        $body['exts']=partnerAttributionId($route,'buyer',$route['buyer']);
     }else $body['flow']=$route['flow_id'];
     foreach(['country','currency'] as $field)if(!empty($route[$field]))$body[$field]=$route[$field];
-    foreach(['sub1'=>'campaign_name','sub2'=>'adgroup_name','sub3'=>'ad_name','sub4'=>'adid_v2','sub5'=>'adid_v2_name'] as $key=>$field)if(!empty($p[$field]))$body[$key]=$p[$field];
-    // Do not silently truncate attribution. Validate before creating any external click.
-    foreach($body as $key=>$value)if(preg_match('/^(utm_|sub|uuid)/',$key)&&preg_match_all('/./us',$value)>255)throw new InvalidArgumentException('Метка '.$key.' превышает лимит ПП 255 символов');
     return [$url.'?id='.rawurlencode($partner['token']),json_encode($body,JSON_THROW_ON_ERROR),['Content-Type: application/json']];
 }
 function partnerAcceptedId(array $partner,array $r): string {
@@ -279,7 +287,7 @@ function receivePostback(array $a): array {
     if(!preg_match('/^[a-zA-Z0-9_-]{1,200}$/D',$click))throw new InvalidArgumentException('Invalid clickid');
     $map=['new'=>'new','lead'=>'new','approve'=>'approved','approved'=>'approved','confirmed'=>'approved','reject'=>'rejected','rejected'=>'rejected','trash'=>'trash','paid'=>'paid','payout'=>'paid'];
     $provider=clean($a['postback']??'lemonad',30);
-    if(!in_array($provider,['lemonad','skylead','cashfactories'],true))throw new InvalidArgumentException('Unknown postback provider');
+    if(!in_array($provider,['lemonad','skylead','cashfactories','offerstore'],true))throw new InvalidArgumentException('Unknown postback provider');
     if($provider!=='lemonad')$map=['wait'=>'new','hold'=>'hold','approve'=>'approved','cancel'=>'rejected','trash'=>'trash'];
     if(!isset($map[$raw]))throw new InvalidArgumentException('Invalid status for selected postback provider');
     $status=$map[$raw];db()->exec('BEGIN IMMEDIATE');
@@ -305,7 +313,7 @@ function postback(): never {
     catch(InvalidArgumentException $e){$code=in_array($e->getCode(),[401,409])?$e->getCode():400;jsonReply(['status'=>'error','message'=>$e->getMessage()],$code);}
     catch(Throwable $e){error_log('Bridge postback: '.get_class($e));jsonReply(['status'=>'error','message'=>'Temporary error'],503);}
 }
-function postbackProviders(): array {return ['lemonad'=>'Lemonad','skylead'=>'Skylead','cashfactories'=>'Cashfactories'];}
+function postbackProviders(): array {return ['lemonad'=>'Lemonad','skylead'=>'Skylead','cashfactories'=>'Cashfactories','offerstore'=>'Offerstore'];}
 function partnerPostbackUrl(string $pid,string $provider): string {
     if(!isset(postbackProviders()[$provider]))throw new InvalidArgumentException('Неизвестная партнёрка');
     $tail=$provider==='lemonad'?'&clickid={clickid}&status={status}&leadid={leadid}':'&clickid={subid}&status={stage}&leadid={id}';
@@ -322,7 +330,7 @@ function postbackGuide(string $pid): void {
     else echo '<p>В '.h(postbackProviders()[$provider]).' вставьте GET-URL в глобальный «Постбек» либо в поле «Постбек» потока. Отметьте все пять галочек: Ожидает, Холд, Принят, Отмена, Треш.</p><p><strong>Поточный постбэк имеет приоритет над глобальным.</strong> Если в потоке уже стоит ссылка Binom, не заменяйте её без настройки отдельной доставки в Binom: мост сам конверсии в трекер не отправляет. Уточните возможность нескольких адресов у ПП. Для одного аккаунта используйте одну запись партнёрки в мосте и её ссылку во всех нужных потоках.</p>';
     echo '<pre id="partner-postback">'.h($url).'</pre><button type="button" data-copy="partner-postback">Скопировать URL постбэка</button>';
     if($provider==='lemonad')echo '<p>Включите все пять статусов и задайте им значения:</p><table><tr><th>Статус Lemonad</th><th>Значение</th></tr><tr><td>Новый лид</td><td>new</td></tr><tr><td>Подтверждён</td><td>approved</td></tr><tr><td>Отклонён</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td></tr><tr><td>Оплачен</td><td>paid</td></tr></table>';
-    else echo '<p>Макросы оставьте без изменений: <code>{subid}</code> — исходный clickid Binom, <code>{stage}</code> — статус, <code>{id}</code> — ID заказа ПП. При отправке лида в ПП в subid должен попасть clickid Binom. Чужие лиды, которых нет в мосте, не появятся в таблице от одного постбэка.</p><table><tr><th>В партнёрке</th><th>{stage}</th><th>В таблице</th></tr><tr><td>Ожидает</td><td>wait</td><td>new</td></tr><tr><td>Холд</td><td>hold</td><td>hold</td></tr><tr><td>Принят</td><td>approve</td><td>approved</td></tr><tr><td>Отмена</td><td>cancel</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td><td>trash</td></tr></table><p>Холд не является апрувом. Если используете hold в Signal postback TikTok, настройте для него отдельное сопоставление. Макросы paid/currency для обновления статуса в Sheets не нужны.</p><p><a href="https://my.skylead.biz/help/wm.php#postback" target="_blank" rel="noopener noreferrer">Документация общего формата Skylead</a> · <a href="https://my.skylead.biz/help/api.php" target="_blank" rel="noopener noreferrer">API Skylead</a>. Для Cashfactories используется тот же формат постбэка.</p>';
+    else echo '<p>Макросы оставьте без изменений: <code>{subid}</code> — исходный clickid Binom, <code>{stage}</code> — статус, <code>{id}</code> — ID заказа ПП. При отправке лида в ПП в subid должен попасть clickid Binom. Чужие лиды, которых нет в мосте, не появятся в таблице от одного постбэка.</p><table><tr><th>В партнёрке</th><th>{stage}</th><th>В таблице</th></tr><tr><td>Ожидает</td><td>wait</td><td>new</td></tr><tr><td>Холд</td><td>hold</td><td>hold</td></tr><tr><td>Принят</td><td>approve</td><td>approved</td></tr><tr><td>Отмена</td><td>cancel</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td><td>trash</td></tr></table><p>Холд не является апрувом. Если используете hold в Signal postback TikTok, настройте для него отдельное сопоставление. Макросы paid/currency для обновления статуса в Sheets не нужны.</p><p><a href="https://my.skylead.biz/help/wm.php#postback" target="_blank" rel="noopener noreferrer">Документация общего формата Skylead</a> · <a href="https://my.skylead.biz/help/api.php" target="_blank" rel="noopener noreferrer">API Skylead</a>. Для Cashfactories используется тот же формат постбэка. <a href="https://offer.store/help/wm.php#postback" target="_blank" rel="noopener noreferrer">Постбэки Offerstore</a> · <a href="https://offer.store/help/api.php" target="_blank" rel="noopener noreferrer">API Offerstore</a>.</p>';
     echo '<p>Постбэки по лидам, которых нет в мосте, игнорируются с ответом 200 OK. Поиск учитывает аккаунт ПП на момент отправки заявки. Неоднозначные совпадения сохраняются для проверки администратором. Ключ даёт право передавать статусы этого аккаунта: не публикуйте ссылку. Изменение кампаний и ключей связок не меняет этот URL. Старые ссылки постбэков отдельных связок также работают.</p><p>Используйте текущий Apps Script из раздела «Подключение» и выполните «Подготовить и проверить». Он добавит <code>TikTok Lead Status</code> и <code>Partner Status Updated</code>. Статусы уже отправленных заявок проверяются пакетами по 100 строк за запуск на лист; новые лиды повторно не отправляются.</p><p>В TikTok Signal postback сопоставьте Lead status → TikTok Lead Status и настройте события для этих значений. Пока постбэк не получен, статус пустой. SENT означает только приём заявки. Старые статусы появятся после повторной отправки постбэка из ПП.</p><p class="muted">Повтор одинакового текущего статуса ничего не меняет. Запоздалые new/hold не отменяют решение; paid — окончательный статус. Для approved/rejected/trash применяется последний полученный статус, так как ПП не передаёт время события в этом шаблоне.</p><p id="copy-status" role="status" aria-live="polite"></p></div>';
 }
 
@@ -488,9 +496,11 @@ function buyerManual(): void {
     <h3>2. Подключите аккаунт партнёрки</h3>
     <p>Откройте <a href="?page=partner">Партнёрки</a> → Добавить. Укажите понятное название аккаунта и <strong>Webmaster token</strong> из профиля Lemonad. Это токен аккаунта, а не ID оффера. Сохраните. Используйте эту же запись партнёрки во всех своих связках данного аккаунта.</p>
     <p><a href="https://docs.limonad.com/doc/en-webmaster-token" target="_blank" rel="noopener noreferrer">Где взять токен Lemonad</a>.</p>
-    <p>Для Skylead/Cashfactories выберите сеть в поле «Партнёрка для отправки», вставьте API-токен из профиля и попросите менеджера активировать API. Выберите тип аккаунта: Вебмастер или Агентство. В связке укажите числовой ID оффера, страну и валюту. ID потока нужен только вебмастеру; для агентства идентификатор заявки создаётся автоматически. В связке выберите режим IP: реальный из Client IP или согласованный с ПП случайный IP страны при отсутствии реального. Для генерации обязательно выберите страну; адрес фиксируется один раз и виден в карточке лида. Действующие заявки не изменяются. <a href="https://my.skylead.biz/help/api.php#push" target="_blank" rel="noopener noreferrer">API Skylead</a> · <a href="https://cashfactories.com/help/api.en.php#push" target="_blank" rel="noopener noreferrer">API Cashfactories</a>.</p>
+    <p>Для Skylead/Cashfactories/Offerstore выберите сеть в поле «Партнёрка для отправки», вставьте API-токен из профиля и попросите менеджера активировать API. Выберите тип аккаунта: Вебмастер или Агентство. В связке укажите числовой ID оффера, страну и валюту. ID потока нужен только вебмастеру; для агентства идентификатор заявки создаётся автоматически. В связке выберите режим IP: реальный из Client IP или согласованный с ПП случайный IP страны при отсутствии реального. Для генерации обязательно выберите страну; адрес фиксируется один раз и виден в карточке лида. Действующие заявки не изменяются. <a href="https://my.skylead.biz/help/api.php#push" target="_blank" rel="noopener noreferrer">API Skylead</a> · <a href="https://cashfactories.com/help/api.en.php#push" target="_blank" rel="noopener noreferrer">API Cashfactories</a> · <a href="https://offer.store/help/api.php" target="_blank" rel="noopener noreferrer">API Offerstore</a>.</p>
+    <p>Источник tiktok передаётся всем ПП. Исходный Lead ID, рекламные ID и логин баера заменяются стабильными непрозрачными метками в uuid/UTM/exts. Названия кампаний/групп/объявлений, placement, Form ID, sub1–sub5 и домен моста не передаются; прежний режим Lemonad «Все метки» передаёт только обезличенные ID без JSON. Контакты, настройки оффера и clickid Binom сохраняются. Агентский extu совместим с прежними заявками. Исходные метки сохраняются в мосте и Binom. Правило действует также для ещё не отправленных заявок со старыми snapshots; сами snapshots не меняются. Уже отправленные данные в истории ПП остаются.</p>
+    <p>Проверьте названия потоков и офферов в кабинете ПП, ссылки постбэков и доступ ПП к Binom/таблицам. Lead Form можно предположить по профилю заявок, времени поступления, IP или публичной информации о сервисе; обезличивание меток не гарантирует скрытие способа сбора. Не добавляйте рекламные метки в ссылки постбэков ПП.</p>
     <h3>3. Добавьте постбэк в партнёрке</h3>
-    <p>Выберите формат своей сети в карточке партнёрки и следуйте инструкции под ссылкой. Для агентства Skylead/Cashfactories статусы автоматически читаются через API; оставьте постбэк на Binom. Для вебмастера отметьте все пять статусов; постбэк потока имеет приоритет над глобальным. Существующую доставку конверсий в Binom нужно сохранить отдельно.</p>
+    <p>Выберите формат своей сети в карточке партнёрки и следуйте инструкции под ссылкой. Для агентства Skylead/Cashfactories/Offerstore статусы автоматически читаются через API; оставьте постбэк на Binom. Для вебмастера отметьте все пять статусов; постбэк потока имеет приоритет над глобальным. Существующую доставку конверсий в Binom нужно сохранить отдельно.</p>
     <p>В сохранённой партнёрке найдите «Статусы ПП → таблица → TikTok» и нажмите <strong>Скопировать URL постбэка</strong>. В Lemonad откройте <strong>Профиль → Global postback and API → Add postback</strong>, вставьте ссылку целиком и включите все пять статусов:</p>
     <div class="scroll"><table><tr><th>Статус Lemonad</th><th>Значение</th></tr><tr><td>Новый лид</td><td>new</td></tr><tr><td>Подтверждён</td><td>approved</td></tr><tr><td>Отклонён</td><td>rejected</td></tr><tr><td>Треш</td><td>trash</td></tr><tr><td>Оплачен</td><td>paid</td></tr></table></div>
     <p>Эта ссылка работает для всех связок, использующих выбранную запись партнёрки. Постбэки по лидам, которых нет в мосте, игнорируются. Сохраните существующий постбэк <strong>Lemonad → Binom</strong>: он нужен для зачёта конверсий в трекере. Постбэк на мост обновляет статусы в таблице. <a href="https://docs.limonad.com/doc/en-postback" target="_blank" rel="noopener noreferrer">Инструкция Lemonad</a>.</p>
@@ -608,12 +618,13 @@ function panel(): void {
         }
         else{echo '<div class="card"><h2>'.($edit?'Редактирование':'Новая запись').'</h2><form method="post">'.csrf().'<input type="hidden" name="op" value="save"><input type="hidden" name="kind" value="'.$page.'"><input type="hidden" name="id" value="'.h($edit).'">';if($page==='route')routePartnerSelect($v['partner']??'');input('name','Название',$v['name']??'');if(isAdmin()){if(!$edit)options('owner','Владелец',accountOptions(),currentUser()['id']);else echo '<p class="muted">Владелец: '.h(accountOptions()[ownerOf($edit)]??'').'</p>';}
             if($page==='tracker'){options('version','Версия',['v1'=>'Binom v1','v2'=>'Binom v2'],$v['version']??'v1');input('click_url','Полный Click URL без параметров (например https://tracker.com/click.php)',$v['click_url']??'','url');input('api_key','API key — оставьте пустым, чтобы сохранить текущий','','password',!$edit);echo '<p class="muted">Для v1: используется clickid из ответа Click API; старый параметр binom_click_id в URL оффера также поддерживается. Для v2: обычно используется /click. Ключ для v1: Settings → API; для v2: API_KEY из Settings → Click API. Проверка связки создаёт технический клик без отправки в ПП.</p>';}
-            elseif($page==='partner'){options('type','Партнёрка для отправки',postbackProviders(),$v['type']??'lemonad');echo '<fieldset data-partner-account style="border:0;padding:0;min-width:0" '.(($v['type']??'lemonad')==='lemonad'?'hidden disabled':'').'>';options('account_type','Тип аккаунта',['webmaster'=>'Вебмастер','agency'=>'Агентство'],partnerAccountType($v));echo '<p class="muted">Выберите тип, выданный вам партнёркой. Вебмастеру нужен ID потока; агентству — только ID оффера. Изменение применяется к новым заявкам всех связок этого аккаунта; уже принятые заявки сохраняют прежние настройки.</p></fieldset>';echo '<p class="muted">Адрес API выбирается автоматически по партнёрке. Сеть существующей записи менять нельзя; тип аккаунта можно изменить выше. Skylead/Cashfactories: токен из профиля; попросите менеджера включить отправку по API.</p>'; input('token','Токен аккаунта — пустое поле сохраняет текущий','','password',!$edit);}
+            elseif($page==='partner'){options('type','Партнёрка для отправки',postbackProviders(),$v['type']??'lemonad');echo '<fieldset data-partner-account style="border:0;padding:0;min-width:0" '.(($v['type']??'lemonad')==='lemonad'?'hidden disabled':'').'>';options('account_type','Тип аккаунта',['webmaster'=>'Вебмастер','agency'=>'Агентство'],partnerAccountType($v));echo '<p class="muted">Выберите тип, выданный вам партнёркой. Вебмастеру нужен ID потока; агентству — только ID оффера. Изменение применяется к новым заявкам всех связок этого аккаунта; уже принятые заявки сохраняют прежние настройки.</p></fieldset>';echo '<p class="muted">Адрес API выбирается автоматически по партнёрке. Сеть существующей записи менять нельзя; тип аккаунта можно изменить выше. Skylead/Cashfactories/Offerstore: токен из профиля; попросите менеджера включить отправку по API.</p>'; input('token','Токен аккаунта — пустое поле сохраняет текущий','','password',!$edit);}
             else{echo '<p class="muted">Buyer ID определяется автоматически по логину владельца'.($edit?': <strong>'.h(buyerLogin(ownerOf($edit))).'</strong>':' после сохранения').'.</p>';options('tracker','Трекер',uiEntities('tracker'),$v['tracker']??'');echo '<div class="grid">';input('campaign_key','Ключ кампании Binom',$v['campaign_key']??'');input('offer_id','API ID оффера',$v['offer_id']??'');echo '</div>'; $selectedPartner=!empty($v['partner'])?uiEntity($v['partner'],'partner'):[];$selectedType=$selectedPartner['type']??'';
-                echo '<fieldset data-route-provider="sky" style="border:0;padding:0;min-width:0" '.(!in_array($selectedType,['skylead','cashfactories'],true)?'hidden disabled':'').'><div class="grid">';
+                echo '<fieldset data-route-provider="sky" style="border:0;padding:0;min-width:0" '.(!in_array($selectedType,['skylead','cashfactories','offerstore'],true)?'hidden disabled':'').'><div class="grid">';
                 echo '<fieldset data-webmaster-flow style="border:0;padding:0;min-width:0" '.(partnerAccountType($selectedPartner)==='agency'?'hidden disabled':'').'>';input('flow_id','ID потока',$v['flow_id']??'','text',true);echo '</fieldset>';options('partner_ip_mode','IP для партнёрки',['client'=>'Только реальный IP из таблицы','country_random'=>'Случайный IP страны, если реального нет'],$v['partner_ip_mode']??'client');options('country','Страна покупателя',countryOptions($v['country']??''),$v['country']??'',false);input('currency','Валюта ISO (например ZAR)',$v['currency']??'','text',false);
-                echo '</div><p class="muted">Основные ID передаются в UTM, названия кампании/группы/объявления и ADID_V2/ADID_V2_NAME — в sub1–sub5. Click ID Binom — в subid, TikTok Lead ID — в uuid. Случайный IP используется при отсутствии реального и фиксируется при приёме заявки. Геобазы ПП могут отличаться. <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">IP Geolocation by DB-IP</a>.</p></fieldset>';
-                echo '<fieldset data-route-provider="lemonad" style="border:0;padding:0;min-width:0" '.($selectedType!=='lemonad'?'hidden disabled':'').'>';options('partner_meta_mode','Метки Lemonad',['legacy'=>'Как раньше: Campaign ID + Ad ID','ids'=>'Основные ID: кампания, объявление, группа и баер','all'=>'Все метки: дополнительные данные JSON в utm_term'],$v['partner_meta_mode']??'legacy');echo '<p class="muted">utm_campaign — Campaign ID, utm_content — Ad ID, utm_source — tiktok. Расширенные режимы добавляют логин в utm_medium; utm_term содержит Ad Group ID либо JSON остальных меток.</p></fieldset>';
+                echo '</div><p class="muted">Click ID Binom передаётся в subid. Источник tiktok сохраняется. ID заявки/рекламы и баер передаются через стабильные непрозрачные метки; исходные ID и названия не передаются. Агентство получает непрозрачный extu для сопоставления статусов. Случайный IP используется при отсутствии реального и фиксируется при приёме заявки. Геобазы ПП могут отличаться. <a href="https://db-ip.com" target="_blank" rel="noopener noreferrer">IP Geolocation by DB-IP</a>.</p></fieldset>';
+                echo '<fieldset data-route-provider="lemonad" style="border:0;padding:0;min-width:0" '.($selectedType!=='lemonad'?'hidden disabled':'').'>';options('partner_meta_mode','Метки Lemonad',['legacy'=>'TikTok + обезличенные ID кампании и объявления','ids'=>'Также обезличенные ID группы и баера','all'=>'Прежний режим: теперь только обезличенные ID'],$v['partner_meta_mode']??'legacy');echo '<p class="muted">Источник tiktok сохраняется; UTM содержат стабильные непрозрачные метки. Исходные ID, названия, placement, Form ID и домен моста не передаются. Прежний режим «Все метки» больше не отправляет JSON.</p></fieldset><p class="muted">Исходные рекламные метки сохраняются в мосте и передаются в Binom согласно сопоставлению ниже.</p>';
+
                 mappingForm($v,!empty($v['tracker'])?uiEntity($v['tracker'],'tracker')['version']:'v2');echo '<label><input type="checkbox" name="active" '.(!empty($v['active'])?'checked':'').'>Связка активна'.fieldHelp('active','Связка активна').'</label>';}
             echo '<div class="actions"><button>Сохранить</button><a href="?page='.$page.'">К списку</a></div></form></div>';
             if($page==='partner'&&$edit)postbackGuide($edit);
@@ -658,9 +669,9 @@ function panel(): void {
     document.getElementById('help-close').addEventListener('click',function(){helpDialog.close();});
     helpDialog.addEventListener('close',function(){document.body.classList.remove('help-visible');helpOpen.focus();});
     helpDialog.addEventListener('click',function(event){if(event.target!==helpDialog)return;var box=helpDialog.getBoundingClientRect();if(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom)helpDialog.close();});
-    var partnerType=document.getElementById('field_type'),partnerAccount=document.querySelector('[data-partner-account]');if(partnerType&&partnerAccount){var updateAccount=function(){var show=['skylead','cashfactories'].includes(partnerType.value);partnerAccount.hidden=!show;partnerAccount.disabled=!show;};partnerType.addEventListener('change',updateAccount);updateAccount();}
+    var partnerType=document.getElementById('field_type'),partnerAccount=document.querySelector('[data-partner-account]');if(partnerType&&partnerAccount){var updateAccount=function(){var show=['skylead','cashfactories','offerstore'].includes(partnerType.value);partnerAccount.hidden=!show;partnerAccount.disabled=!show;};partnerType.addEventListener('change',updateAccount);updateAccount();}
     var routePartner=document.querySelector('[data-route-partner]');
-    if(routePartner){var updatePartnerFields=function(){var selected=routePartner.options[routePartner.selectedIndex];var type=selected?selected.dataset.provider:'';document.querySelectorAll('[data-route-provider]').forEach(function(group){var show=group.dataset.routeProvider===(type==='skylead'||type==='cashfactories'?'sky':type);group.hidden=!show;group.disabled=!show;});var flow=document.querySelector('[data-webmaster-flow]');if(flow){var needFlow=(type==='skylead'||type==='cashfactories')&&selected.dataset.accountType!=='agency';flow.hidden=!needFlow;flow.disabled=!needFlow;}var country=document.getElementById('field_country'),mode=document.getElementById('field_partner_ip_mode');if(country&&mode)country.required=(type==='skylead'||type==='cashfactories')&&mode.value==='country_random';};routePartner.addEventListener('change',updatePartnerFields);var routeIp=document.getElementById('field_partner_ip_mode');if(routeIp)routeIp.addEventListener('change',updatePartnerFields);updatePartnerFields();}
+    if(routePartner){var updatePartnerFields=function(){var selected=routePartner.options[routePartner.selectedIndex];var type=selected?selected.dataset.provider:'';document.querySelectorAll('[data-route-provider]').forEach(function(group){var show=group.dataset.routeProvider===(['skylead','cashfactories','offerstore'].includes(type)?'sky':type);group.hidden=!show;group.disabled=!show;});var flow=document.querySelector('[data-webmaster-flow]');if(flow){var needFlow=(['skylead','cashfactories','offerstore'].includes(type))&&selected.dataset.accountType!=='agency';flow.hidden=!needFlow;flow.disabled=!needFlow;}var country=document.getElementById('field_country'),mode=document.getElementById('field_partner_ip_mode');if(country&&mode)country.required=(['skylead','cashfactories','offerstore'].includes(type))&&mode.value==='country_random';};routePartner.addEventListener('change',updatePartnerFields);var routeIp=document.getElementById('field_partner_ip_mode');if(routeIp)routeIp.addEventListener('change',updatePartnerFields);updatePartnerFields();}
     document.querySelectorAll('[data-postback-provider]').forEach(function(select){select.addEventListener('change',function(){select.form.requestSubmit();});});
     document.querySelectorAll('[data-user-filter]').forEach(function(select){select.addEventListener('change',function(){select.form.requestSubmit();});});
     function feedback(button,label,success){

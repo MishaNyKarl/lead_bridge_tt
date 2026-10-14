@@ -9,18 +9,18 @@ setting('base_url','https://bridge.example');
 $t=['version'=>'v2','click_url'=>'https://tracker.example/click','api_key'=>'test'];saveEntity('t','tracker',$t);
 $r=['name'=>'Test','buyer'=>'test','tracker'=>'t','partner'=>'p','campaign_key'=>'test','offer_id'=>'123','flow_id'=>'456','country'=>'ZA','currency'=>'ZAR','active'=>true,'tokens'=>[]];saveEntity('r','route',$r);
 $p=['lead_id'=>'12345678901234567890','phone'=>'+27840000000','name'=>'Test','ip'=>'8.8.8.8','campaign_id'=>'12345678901234567890','adgroup_id'=>'2','ad_id'=>'3','adid_v2'=>'4','adid_v2_name'=>'Separate'];
-foreach(['skylead'=>'https://api.skylead.biz/wm/push.json','cashfactories'=>'https://cashfactories.com/api/wm/push.json'] as $type=>$endpoint){
+foreach(['skylead'=>'https://api.skylead.biz/wm/push.json','cashfactories'=>'https://cashfactories.com/api/wm/push.json','offerstore'=>'https://api.offer.store/wm/push.json'] as $type=>$endpoint){
  $partner=['type'=>$type,'token'=>'mock&token'];saveEntity('p','partner',$partner);
  [$url,$body,$headers]=partnerRequest($partner,$r,$p,'https://bridge.example','click1');$b=json_decode($body,true);
  ck($url===$endpoint.'?id=mock%26token','fixed endpoint '.$type);
  ck($b['flow']==='456'&&$b['offer']==='123'&&$b['ip']==='8.8.8.8'&&$b['phone']==='27840000000'&&$b['country']==='ZA','required body '.$type);
- ck($b['subid']==='click1'&&$b['uuid']===$p['lead_id']&&$b['utm_campaign']===$p['campaign_id']&&$b['sub4']==='4'&&$b['sub5']==='Separate','attribution precision '.$type);
+ ck($b['subid']==='click1'&&$b['utm_source']==='tiktok'&&$b['uuid']!==$p['lead_id']&&$b['utm_campaign']!==$p['campaign_id']&&!isset($b['sub4'],$b['sub5']),'partner attribution aliases '.$type);
  $missing=$p;unset($missing['ip']);rejects(fn()=>enqueue('r',$r,$missing),'no IP rejected before enqueue '.$type);
- $long=$p;$long['ad_name']=str_repeat('x',256);rejects(fn()=>partnerRequest($partner,$r,$long,'https://bridge.example','click1'),'long tag not truncated');
+ $long=$p;$long['ad_name']=str_repeat('x',256);ck(partnerRequest($partner,$r,$long,'https://bridge.example','click1')===partnerRequest($partner,$r,$p,'https://bridge.example','click1'),'omitted long attribution does not block lead');
  foreach(['127.0.0.1','10.0.0.1','bad'] as $ip){$bad=$p;$bad['ip']=$ip;rejects(fn()=>validatePartnerLead($partner,$r,$bad),'invalid customer IP');}
- $responses=['{"status":"ok","id":1234}'=>'sent','{"status":"ok","id":123456789012345678901}'=>'sent','{"status":"ok"}'=>'partner_review','{"status":"error","error":"duplicate","id":1234}'=>'partner_review','{"status":"ok","id":true}'=>'partner_review','<html>error</html>'=>'partner_review','{"status":"ok","id":1.2}'=>'partner_review','timeout'=>'partner_review'];
+ $responses=['{"status":"ok","id":1234}'=>'sent','{"status":"ok","id":123456789012345678901}'=>'sent','{"status":"ok"}'=>'partner_review','{"status":"ok","uid":1234}'=>'partner_review','{"status":"ok","id":1234,"error":"key"}'=>'partner_review',''=>'partner_review','http500'=>'partner_review','{"status":"error","error":"duplicate","id":1234}'=>'partner_review','{"status":"ok","id":true}'=>'partner_review','<html>error</html>'=>'partner_review','{"status":"ok","id":1.2}'=>'partner_review','timeout'=>'partner_review'];
  foreach($responses as $body=>$expected){$p['lead_id']=(string)((int)($n??0)+1);$n=(int)$p['lead_id'];$a=enqueue('r',$r,$p);$calls=[];
- $mock=function($url,$request,$headers)use(&$calls,$body){$calls[]=$url;if(str_contains($url,'tracker.example'))return ['code'=>200,'error'=>'','body'=>'{"click_info":{"id":"confirmed-click"}}'];return ['code'=>$body==='timeout'?0:200,'error'=>$body==='timeout'?'transport':'','body'=>$body];};
+ $mock=function($url,$request,$headers)use(&$calls,$body){$calls[]=$url;if(str_contains($url,'tracker.example'))return ['code'=>200,'error'=>'','body'=>'{"click_info":{"id":"confirmed-click"}}'];return ['code'=>$body==='timeout'?0:($body==='http500'?500:200),'error'=>$body==='timeout'?'transport':'','body'=>$body==='http500'?'{"status":"ok","id":1234}':$body];};
  processLead($a['receipt'],$mock);$l=sql('SELECT * FROM leads WHERE id=?',[$a['receipt']])->fetch();ck($l['state']===$expected&&count($calls)===2,'acceptance '.$type.' '.$body);
  if(str_contains($body,'123456789012345678901'))ck($l['partner_id']==='123456789012345678901','big partner ID preserved');
  processLead($a['receipt'],$mock);ck(count($calls)===2,'no blind repeat '.$type);
@@ -29,12 +29,12 @@ foreach(['skylead'=>'https://api.skylead.biz/wm/push.json','cashfactories'=>'htt
 }
 
 // Account mode is immutable for queued leads, including legacy webmaster snapshots.
-foreach(['skylead'=>'https://api.skylead.biz/ext/add.json','cashfactories'=>'https://cashfactories.com/api/ext/add.json'] as $type=>$endpoint){
+foreach(['skylead'=>'https://api.skylead.biz/ext/add.json','cashfactories'=>'https://cashfactories.com/api/ext/add.json','offerstore'=>'https://api.offer.store/ext/add.json'] as $type=>$endpoint){
  $agency=['type'=>$type,'account_type'=>'agency','token'=>'test'];$ar=$r;unset($ar['flow_id']);
  $p['lead_id']='123456789012345678901234';
  [$url,$request]=partnerRequest($agency,$ar,$p,'https://bridge.example','click1');$body=json_decode($request,true);
  ck($url===$endpoint.'?id=test'&&!isset($body['flow'])&&$body['offer']==='123','agency endpoint and no flow '.$type);
- ck($body['uuid']===$p['lead_id']&&$body['subid']==='click1'&&strlen($body['extu'])===64&&$body['exts']===$r['buyer'],'agency identity and attribution '.$type);
+ ck($body['subid']==='click1'&&strlen($body['extu'])===64&&strlen($body['uuid'])===64&&$body['exts']!==$r['buyer'],'agency identity and attribution '.$type);
  $other=$ar;$other['buyer']='other';ck(json_decode(partnerRequest($agency,$other,$p,'https://bridge.example','click1')[1],true)['extu']!==$body['extu'],'agency identities isolated by buyer');
  rejects(fn()=>validatePartnerLead(['type'=>$type],$ar,$p),'webmaster still requires flow');
  rejects(fn()=>partnerApiUrl(['type'=>$type,'account_type'=>'wrong']),'invalid mode rejected');

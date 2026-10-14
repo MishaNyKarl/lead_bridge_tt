@@ -34,7 +34,7 @@ function pollAgencyStatuses(?callable $http=null,?int $now=null): void {
     $batch=[];$group=null;$partner=[];
     foreach(sql("SELECT p.*,l.snapshot,l.partner_id,l.external_id,l.state FROM partner_poll p JOIN leads l ON l.id=p.lead WHERE p.next_at>=0 AND p.next_at<=? ORDER BY p.next_at,p.lead LIMIT 100",[$now])->fetchAll() as $row){
         $s=unseal($row['snapshot']);$pp=$s['partner']??[];
-        if($row['state']!=='sent'||!in_array($pp['type']??'',['skylead','cashfactories'],true)||partnerAccountType($pp)!=='agency'||!preg_match('/^[1-9][0-9]*$/D',$row['partner_id'])){sql('UPDATE partner_poll SET next_at=-1 WHERE lead=?',[$row['lead']]);continue;}
+        if($row['state']!=='sent'||!in_array($pp['type']??'',['skylead','cashfactories','offerstore'],true)||partnerAccountType($pp)!=='agency'||!preg_match('/^[1-9][0-9]*$/D',$row['partner_id'])){sql('UPDATE partner_poll SET next_at=-1 WHERE lead=?',[$row['lead']]);continue;}
         $pid=$s['route']['partner'];
         try{bridgeBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$row['lead']])->fetchColumn()));}catch(BackgroundDenied $e){continue;}
         $key=hash('sha256',json_encode([$pid,$pp['type'],$pp['token']],JSON_THROW_ON_ERROR));
@@ -48,7 +48,7 @@ function pollAgencyStatuses(?callable $http=null,?int $now=null): void {
     $ids=array_column($batch,'partner_id');$failure='';$rows=[];
     try{
         foreach($batch as $lead)bridgeBackground(ownerOf(sql('SELECT route FROM leads WHERE id=?',[$lead['lead']])->fetchColumn()));
-        $base=$partner['type']==='skylead'?'https://api.skylead.biz':'https://cashfactories.com/api';
+        $base=partnerApiBase($partner['type']);
         $response=$http($base.'/ext/list.json?id='.rawurlencode($partner['token']),http_build_query(['oid'=>implode(',',array_unique($ids))]),['Content-Type: application/x-www-form-urlencoded']);
         $rows=agencyStatusRows($response);
     }catch(Throwable $e){$failure=$e instanceof RuntimeException?$e->getMessage():'Ошибка чтения API';if(strlen($failure)>180)$failure='Ошибка чтения API';}

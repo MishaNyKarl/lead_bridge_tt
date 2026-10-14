@@ -99,7 +99,7 @@ try:
  # Outbound adapter settings: immutable type, owner enforcement, new account default callback.
  assert_ok('Неизвестная' in a.post(op='save',kind='partner',name='BAD',type='invalid',token='test')[1],'outbound provider allowlist')
  assert_ok('создайте новую' in a.post(op='save',kind='partner',id='partner_a',name='PARTNER_a',type='skylead',token='test')[1],'existing outbound type immutable')
- for provider in ['skylead','cashfactories']:
+ for provider in ['skylead','cashfactories','offerstore']:
   a.post(op='save',kind='partner',name='OUT_'+provider,type=provider,token='test-token')
   pid=conn.execute("SELECT id FROM entities WHERE kind='partner' AND owner='buyer_a' ORDER BY rowid DESC LIMIT 1").fetchone()[0]
   page=a.req('?page=partner&edit='+pid)[1]
@@ -116,6 +116,13 @@ try:
   data.update(partner_ip_mode='country_random',country='ZA',tracker=tid)
   page=a.post(**data)[1]
   assert_ok('value="country_random" selected' in page and 'value="ZA" selected' in page,'random IP mode saved '+provider)
+  a.post(op='save',kind='partner',id=pid,name='OUT_'+provider,type=provider,account_type='agency',token='')
+  page=a.req('?page=partner&edit='+pid)[1]
+  assert_ok('value="agency" selected' in page and 'Автоматическая проверка через API агентства включена' in page,'agency saved with API status guide '+provider)
+  data.update(name='AGENCY_ROUTE',flow_id='')
+  page=a.post(**data)[1]
+  assert_ok('value="AGENCY_ROUTE"' in page and 'hidden disabled' in page and 'Укажите числовые ID' not in page,'agency route accepts no flow '+provider)
+  assert_ok('value="agency" selected' in a.req('?page=partner&edit='+pid)[1],'empty token retains credentials '+provider)
 
  # Announcements are admin-published, acknowledged per user and version, never by viewing.
  banner='id="script-update-notice"'

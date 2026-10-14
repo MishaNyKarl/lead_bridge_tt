@@ -2,14 +2,21 @@ const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/st
 const source=fs.readFileSync(__dirname+'/LeadBridge.gs','utf8');
 function env(rows,fetch,extraSheets=[]) {
   const props={BRIDGE_URL:'https://bridge.example.com/action.php',ROUTE_ID:'route_abc',BRIDGE_SECRET:'a'.repeat(64)};
-  const formats=[];
-  const sheets=[rows,...extraSheets].map((rows,index)=>({getSheetId:()=>index+1,getName:()=>"Form "+(index+1),getLastColumn:()=>rows[0].length,getLastRow:()=>rows.length,maxRows:100,getMaxRows(){return this.maxRows;},insertRowsAfter(after,count){assert.equal(after,this.maxRows);this.maxRows+=count;},getRangeList(ranges){return {setNumberFormat(format){formats.push({sheet:index+1,ranges:[...ranges],format});
-  ranges.forEach(range=>{const match=/^([A-Z]+)([0-9]+):[A-Z]+([0-9]+)$/.exec(range);assert.ok(match);let column=0;for(const ch of match[1])column=column*26+ch.charCodeAt(0)-64;
-    for(let ri=Number(match[2])-1;ri<Math.min(rows.length,Number(match[3]));ri++){const value=rows[ri]?.[column-1];if(typeof value==='number')rows[ri][column-1]=value.toExponential(5).replace('.',',');}
-  });return this;}};},getRange(r,c,n=1,m=1){return {getValues:()=>Array.from({length:n},(_,i)=>Array.from({length:m},(_,j)=>rows[r-1+i]?.[c-1+j]??'')),setValue(v){rows[r-1]??=[];rows[r-1][c-1]=v;return this;},setNumberFormat(){return this;}};}}));
+  const outputs=['Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt','TikTok Lead Status','Partner Status Updated'];
+  const sheets=[rows,...extraSheets].map((rows,index)=>({
+    getSheetId:()=>index+1,getName:()=>"Form "+(index+1),getLastColumn:()=>rows[0].length,getLastRow:()=>rows.length,maxRows:100,
+    getMaxRows(){return this.maxRows;},
+    insertRowsAfter(){throw Error('Connector must not allocate input rows');},
+    getRangeList(){throw Error('Connector must not format input ranges');},
+    getRange(r,c,n=1,m=1){return {
+      getValues:()=>Array.from({length:n},(_,i)=>Array.from({length:m},(_,j)=>rows[r-1+i]?.[c-1+j]??'')),
+      setValue(v){assert.ok(outputs.includes(r===1?v:rows[0][c-1]),'Only output columns may be written');rows[r-1]??=[];rows[r-1][c-1]=v;return this;},
+      setNumberFormat(){throw Error('Connector must not change cell formats');}
+    };}
+  }));
   sheets.forEach(sheet=>props['sheet_config_'+sheet.getSheetId()]=JSON.stringify({BRIDGE_URL:props.BRIDGE_URL,ROUTE_ID:props.ROUTE_ID,BRIDGE_SECRET:props.BRIDGE_SECRET}));
   props.sheet_config_version='1';
-  const ctx={console,Date,Number,JSON,Error,String,Object,Array,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperty:(k,v)=>props[k]=v,getProperties:()=>props,deleteProperty:k=>delete props[k]})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheets:()=>sheets,getActiveSheet:()=>sheets[0]}),flush(){}},UrlFetchApp:{fetch:(url,o)=>{let r=fetch(JSON.parse(o.payload),o,url);return {getResponseCode:()=>r.code,getContentText:()=>JSON.stringify(r.data)};}}};vm.createContext(ctx);vm.runInContext(source,ctx);return {ctx,props,sheets,formats};
+  const ctx={console,Date,Number,JSON,Error,String,Object,Array,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperty:(k,v)=>props[k]=v,getProperties:()=>props,deleteProperty:k=>delete props[k]})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheets:()=>sheets,getActiveSheet:()=>sheets[0]}),flush(){}},UrlFetchApp:{fetch:(url,o)=>{let r=fetch(JSON.parse(o.payload),o,url);return {getResponseCode:()=>r.code,getContentText:()=>JSON.stringify(r.data)};}}};vm.createContext(ctx);vm.runInContext(source,ctx);return {ctx,props,sheets};
 }
 const headers=['Lead ID','Phone','Name','Campaign ID','Ad ID','Ad Group ID','Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt'];
 let calls=0,rows=[headers.slice(),['9000000000000000001','+254700000001','Test','9000000000000000002','3','4','','','','','']];
@@ -111,11 +118,11 @@ e.ctx.bridgeTick();assert.equal(history[1][6],'SENT');
 e=env([['Lead ID','Phone']],()=>({code:200,data:{status:'ok'}}));e.ctx.bridgeSaveSheetConfig(e.sheets[0],config);assert.equal(e.ctx.bridgeConfig(e.sheets[0]).ROUTE_ID,'route_def');
 console.log('PASS: legacy migration, unconfigured copies skipped, explicit per-sheet setup, history protection, secret rotation');
 
-// Prepare only empty future rows before exports, including empty tabs and aliases.
+// Even damaged source values remain untouched; reject unsafe IDs without rewriting them.
 const precisionHeaders=['Lead ID','Phone','Form ID','Adset ID','ADID_V2','Notes'];
 e=env([precisionHeaders.slice()],()=>{throw Error('Empty tabs must not send');},[[...['Lead ID','Phone']]]);
 delete e.props.sheet_config_2;e.ctx.bridgeTick();
-assert.deepEqual(e.formats,[{sheet:1,ranges:['A2:A501','B2:B501','C2:C501','D2:D501','E2:E501','H2:H501','I2:I501','K2:K501'],format:'@'}]);
+assert.equal(e.sheets[0].maxRows,100);
 const damaged=[precisionHeaders.slice(),['9000000000000000001','+254700000001',9000000000000000002,'1','2','']];
 e=env(damaged,()=>{throw Error('Formatting must not hide lost precision');});e.ctx.bridgeTick();
 assert.equal(damaged[1][damaged[0].indexOf('Webhook_Status')],'REVIEW');
@@ -123,13 +130,11 @@ assert.match(damaged[1][damaged[0].indexOf('Webhook_Message')],/Form ID: ID ок
 assert.equal(typeof damaged[1][2],'number');
 e=env([['Lead ID','Phone']],()=>({code:200,data:{status:'ok'}}));
 e.ctx.bridgeSaveSheetConfig(e.sheets[0],{BRIDGE_URL:e.props.BRIDGE_URL,ROUTE_ID:'route_abc',BRIDGE_SECRET:'a'.repeat(64)});
-assert.ok(e.formats.some(f=>f.ranges.includes('A2:A501')&&f.ranges.includes('B2:B501')));
-e.sheets[0].getMaxRows=()=>600;e.formats.length=0;e.ctx.bridgeTick();
-assert.ok(e.formats[0].ranges.includes('A2:A600'));
+assert.equal(e.sheets[0].maxRows,100);e.ctx.bridgeTick();
 const wide=Array.from({length:28},(_,i)=>'Notes '+i);wide[0]='Lead ID';wide[1]='Phone';wide[26]='Form ID';wide[27]='ad_group_id';
 e=env([wide],()=>{throw Error('Empty tab must not send');});e.ctx.bridgeTick();
-assert.ok(e.formats[0].ranges.includes('AA2:AA501'));assert.ok(e.formats[0].ranges.includes('AB2:AB501'));
-console.log('PASS: future text columns prepared on configure and empty ticks, aliases after Z, growth, unconfigured tabs skipped, rounded numbers still rejected with field name');
+assert.equal(wide[26],'Form ID');assert.equal(wide[27],'ad_group_id');
+console.log('PASS: configure and ticks leave source columns/formats and row count unchanged, unsafe IDs still rejected with field name');
 
 // Enabling the single trigger prepares every configured tab before scheduling any sends.
 e=env([['Lead ID','Phone']],()=>{throw Error('Enabling must not send');},[[ 'Lead ID','Phone' ],['Notes']].map(h=>[h]));
@@ -137,18 +142,17 @@ delete e.props.sheet_config_3;
 let created=0;
 e.ctx.LockService.getScriptLock=()=>({waitLock(){},releaseLock(){}});
 e.ctx.SpreadsheetApp.getUi=()=>({Button:{YES:'yes'},ButtonSet:{YES_NO:'yes_no'},alert:()=> 'yes'});
-e.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger(name){assert.equal(name,'bridgeTick');assert.equal(e.formats.length,2);return {timeBased(){return this;},everyMinutes(n){assert.equal(n,1);return this;},create(){created++;}};}};
-e.ctx.bridgeEnable();assert.equal(created,1);assert.deepEqual(e.formats.map(f=>f.sheet),[1,2]);
+e.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger(name){assert.equal(name,'bridgeTick');assert.ok(e.sheets[0].getLastColumn()>2);assert.ok(e.sheets[1].getLastColumn()>2);assert.equal(e.sheets[2].getLastColumn(),1);return {timeBased(){return this;},everyMinutes(n){assert.equal(n,1);return this;},create(){created++;}};}};
+e.ctx.bridgeEnable();assert.equal(created,1);assert.ok(e.sheets.every(s=>s.maxRows===100));
 console.log('PASS: enabling prepares all configured sheets before creating one shared trigger, no lead submissions');
 
 
-// Existing source values are never reformatted. Sheets may coerce numeric cells to displayed E+ strings.
+// Preparation adds output headers without touching existing source values or cell formats.
 const sourceRows=[['Lead ID','Phone','Form ID'],['9000000000000000001','+254700000001','9000000000000000123'],['9000000000000000002','+254700000002',9000000000000000123]];
 e=env(sourceRows,()=>{throw Error('Preparation must never submit');});
 const before=sourceRows.map(r=>r.slice(0,3));e.ctx.bridgePrepareSheet(e.sheets[0]);
 assert.deepEqual(sourceRows.map(r=>r.slice(0,3)),before);
-assert.ok(e.formats[0].ranges.every(r=>/^[A-Z]+4:[A-Z]+503$/.test(r)));
-assert.equal(e.sheets[0].maxRows,503);
+assert.equal(e.sheets[0].maxRows,100);
 e.props.sheet_form_id_1='1111111111111111111';
 assert.throws(()=>e.ctx.bridgeMetadata(['Form ID'],[9000000000000000123]),/округлён/);
 assert.equal(typeof e.ctx.bridgeConfigureForm,'undefined');
@@ -159,11 +163,12 @@ e=env(newRows,body=>{assert.equal(body.lead_id,'9000000000000000003');assert.equ
 e.ctx.bridgePrepareSheet(e.sheets[0]);
 newRows.push(['9000000000000000003','+254700000001','9000000000000000123']);
 e.ctx.bridgeTick();assert.equal(newRows[1][newRows[0].indexOf('Webhook_Status')],'QUEUED');
-console.log('PASS: 500 blank rows prepared before export, only empty future rows formatted, old input unchanged, manual Form ID removed, exact incoming strings preserved');
+assert.equal(newRows[1][0],'9000000000000000003');assert.equal(newRows[1][2],'9000000000000000123');
+console.log('PASS: preparation and enqueue preserve exact incoming strings and numeric input; output writes only; no manual Form ID');
 
-// Opening a workbook prepares the configured future input ranges without sending or migrating copies.
+// onOpen only creates a menu: opening an input workbook cannot mutate its grid or call the server.
 e=env([['Lead ID','Phone','Form ID']],()=>{throw Error('onOpen preparation must never send');},[[['Lead ID','Phone']]]);
-delete e.props.sheet_config_2;e.ctx.bridgePrepareConfiguredFutureRows();
-assert.equal(e.formats.length,1);assert.equal(e.formats[0].sheet,1);
-assert.ok(e.formats[0].ranges.includes('C2:C501'));
-console.log('PASS: on-open preparation reserves text cells only on explicitly configured sheets, no lead requests');
+const menu={addItem(){return this;},addToUi(){}};
+e.ctx.SpreadsheetApp={getUi:()=>({createMenu:()=>menu}),getActiveSpreadsheet(){throw Error('onOpen must not access the input grid');}};
+e.ctx.onOpen();
+console.log('PASS: onOpen creates menu only, no input access or lead requests');

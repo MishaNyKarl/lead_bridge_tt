@@ -1,5 +1,5 @@
-// Lead Bridge central connector. IDs must arrive as text, before TikTok writes them.
-var BRIDGE_SCRIPT_VERSION='1.13.8';
+// Lead Bridge central connector. Read TikTok input without changing its values or formats.
+var BRIDGE_SCRIPT_VERSION='1.13.9';
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Lead Bridge')
     .addItem('Настроить', 'bridgeConfigure')
@@ -8,7 +8,6 @@ function onOpen() {
     .addItem('Включить отправку раз в минуту', 'bridgeEnable')
     .addItem('Выключить мой триггер', 'bridgeDisable')
     .addItem('Пересканировать строки', 'bridgeRescan').addToUi();
-  bridgePrepareConfiguredFutureRows();
 }
 function bridgeValidateConfig(c) {
   if (!c || !c.BRIDGE_URL || !/^https:\/\/[^\s]+$/.test(c.BRIDGE_URL) || !/^route_[a-f0-9]+$/.test(c.ROUTE_ID) || !/^[a-f0-9]{64}$/.test(c.BRIDGE_SECRET)) throw Error('Некорректные настройки');
@@ -65,34 +64,13 @@ function bridgeHeaders(sheet, prepare) {
   if (!sheet.getLastColumn()) return null;
   var h=sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0].map(function(x){return String(x).trim();});
   if(h.indexOf('Phone')<0 || (h.indexOf('Lead ID')<0 && h.indexOf('TikTok Lead ID')<0))return null;
-  if(prepare) ['Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt','TikTok Lead Status','Partner Status Updated'].forEach(function(k){if(h.indexOf(k)<0){h.push(k);sheet.getRange(1,h.length,sheet.getMaxRows(),1).setNumberFormat('@');sheet.getRange(1,h.length).setValue(k);}});
-  if(prepare)bridgeTextColumns(sheet,h);
+  if(prepare) ['Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt','TikTok Lead Status','Partner Status Updated'].forEach(function(k){if(h.indexOf(k)<0){h.push(k);sheet.getRange(1,h.length).setValue(k);}});
   if(h.indexOf('Webhook_Status')<0 || h.indexOf('Bridge Receipt')<0)throw Error('Сначала выполните подготовку таблицы');
   return h;
 }
 function bridgeHeaderKey(value){return String(value).trim().toLowerCase().replace(/[ _-]/g,'');}
-function bridgeTextColumns(sheet,h) {
-  // Prepare only empty future rows BEFORE the next export.
-  // Sheets can convert existing numeric cells to their displayed E+ text when formatting.
-  // Never touch populated input rows or infer lost digits.
-  var last=sheet.getLastRow(),first=Math.max(2,last+1),reserve=500,max=sheet.getMaxRows();
-  if(max-last<reserve){var extra=reserve-(max-last);sheet.insertRowsAfter(max,extra);max+=extra;}
-  var names=['Lead ID','TikTok Lead ID','Phone','Campaign ID','Ad ID','Ad Group ID','Adgroup ID','Adset ID','Advertiser ID','Form ID','ADID_V2','Binom Click ID','Partner Reference ID','Bridge Receipt'].map(bridgeHeaderKey);
-  var ranges=[];h.forEach(function(name,i){
-    if(names.indexOf(bridgeHeaderKey(name))<0)return;
-    var column='',n=i+1;while(n){n--;column=String.fromCharCode(65+n%26)+column;n=Math.floor(n/26);}
-    ranges.push(column+first+':'+column+max);
-  });
-  if(ranges.length)sheet.getRangeList(ranges).setNumberFormat('@');
-}
 function bridgePrepareSheet(s) {
   var h=bridgeHeaders(s,true);if(!h)throw Error('На выбранном листе нужны Phone и Lead ID / TikTok Lead ID');
-}
-function bridgePrepareConfiguredFutureRows() {
-  var lock=LockService.getScriptLock();if(!lock.tryLock(1000))return;
-  try {SpreadsheetApp.getActiveSpreadsheet().getSheets().forEach(function(sheet){
-    try {if(bridgeConfig(sheet))bridgePrepareSheet(sheet);}catch(error){console.error('Lead Bridge: подготовка листа '+sheet.getSheetId()+': '+error.message);}
-  });SpreadsheetApp.flush();}finally{lock.releaseLock();}
 }
 function bridgeSetup() {
   var s=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(),lock=LockService.getScriptLock();lock.waitLock(10000);

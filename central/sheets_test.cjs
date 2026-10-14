@@ -137,3 +137,24 @@ e.ctx.SpreadsheetApp.getUi=()=>({Button:{YES:'yes'},ButtonSet:{YES_NO:'yes_no'},
 e.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger(name){assert.equal(name,'bridgeTick');assert.equal(e.formats.length,2);return {timeBased(){return this;},everyMinutes(n){assert.equal(n,1);return this;},create(){created++;}};}};
 e.ctx.bridgeEnable();assert.equal(created,1);assert.deepEqual(e.formats.map(f=>f.sheet),[1,2]);
 console.log('PASS: enabling prepares all configured sheets before creating one shared trigger, no lead submissions');
+
+// A sheet's explicitly pinned original Form ID can replace a number supplied by the connector.
+const exactForm='9000000000000000123';
+rows=[['Lead ID','Phone','Form ID'],['9000000000000000001','+254700000001',Number(exactForm)]];
+let sentForm=[];e=env(rows,body=>{sentForm.push(body.form_id);return {code:202,data:{status:'processing',receipt:'r-form'}};});
+e.ctx.bridgePrepareSheet(e.sheets[0]);e.ctx.bridgeSetForm(e.sheets[0],exactForm);e.ctx.bridgeTick();
+assert.deepEqual(sentForm,[exactForm]);assert.equal(rows[1][2],exactForm);assert.equal(typeof rows[1][2],'string');
+assert.throws(()=>e.ctx.bridgeSetForm(e.sheets[0],'9000000000000000124'),/нельзя переключать/);
+rows=[['Lead ID','Phone','Form ID'],['9000000000000000002','+254700000001','9000000000000000124']];
+e=env(rows,()=>{throw Error('Conflicting form must not send');});e.ctx.bridgePrepareSheet(e.sheets[0]);
+assert.throws(()=>e.ctx.bridgeSetForm(e.sheets[0],exactForm),/другой точный Form ID/);assert.equal(e.props.sheet_form_id_1,undefined);
+rows=[['Lead ID','Phone','Form ID'],['9000000000000000003','+254700000001','9,0000E+18']];
+e=env(rows,body=>{assert.equal(body.form_id,exactForm);return {code:202,data:{status:'processing',receipt:'r-exp'}};});
+e.props.sheet_form_id_1=exactForm;e.ctx.bridgeTick();assert.equal(rows[1][2],exactForm);
+rows=[['Lead ID','Phone','Form ID'],[Number('9000000000000000003'),'+254700000001',Number(exactForm)]];
+e=env(rows,()=>{throw Error('Pinned Form ID never permits unsafe Lead ID');});e.props.sheet_form_id_1=exactForm;e.ctx.bridgeTick();
+assert.match(rows[1][rows[0].indexOf('Webhook_Message')],/округлён/);assert.equal(typeof rows[1][2],'number');
+rows=[['Lead ID','Phone','Form ID','Webhook_Status','Bridge Receipt'],['9000000000000000004','+254700000001',Number(exactForm),'SENT','r-sent']];
+e=env(rows,body=>{assert.equal(body.op,'status');return {code:200,data:{results:{}}};});e.props.sheet_form_id_1=exactForm;e.ctx.bridgeTick();
+assert.equal(rows[1][3],'SENT');assert.equal(typeof rows[1][2],'number');
+console.log('PASS: exact per-sheet Form ID overrides connector numbers/exponents only by explicit setting, rejects conflicting forms, never bypasses Lead ID checks or rewrites SENT');

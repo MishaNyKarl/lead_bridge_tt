@@ -3,6 +3,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('Lead Bridge')
     .addItem('Настроить', 'bridgeConfigure')
     .addItem('Подготовить и проверить', 'bridgeSetup')
+    .addItem('Задать Form ID листа', 'bridgeConfigureForm')
     .addItem('Подключённые листы', 'bridgeConnections')
     .addItem('Включить отправку раз в минуту', 'bridgeEnable')
     .addItem('Выключить мой триггер', 'bridgeDisable')
@@ -81,6 +82,42 @@ function bridgeTextColumns(sheet,h) {
 }
 function bridgePrepareSheet(s) {
   var h=bridgeHeaders(s,true);if(!h)throw Error('На выбранном листе нужны Phone и Lead ID / TikTok Lead ID');
+}
+function bridgeSetForm(sheet,value) {
+  var id=bridgeId(value);if(!id)throw Error('Укажите полный Form ID из TikTok');
+  if(!bridgeConfig(sheet))throw Error('Сначала подключите лист через Lead Bridge → Настроить');
+  var p=PropertiesService.getScriptProperties(),key='sheet_form_id_'+sheet.getSheetId(),old=p.getProperty(key);
+  if(old&&old!==id)throw Error('Для другой формы используйте новый лист. Закреплённый Form ID нельзя переключать');
+  var h=bridgeHeaders(sheet,false);h.forEach(function(header,column){
+    if(bridgeHeaderKey(header)!=='formid'||sheet.getLastRow()<2)return;
+    sheet.getRange(2,column+1,sheet.getLastRow()-1,1).getValues().forEach(function(row){
+      var raw=row[0];if(typeof raw==='string'&&/^\d{1,40}$/.test(raw.trim())&&raw.trim()!==id)throw Error('На листе есть другой точный Form ID. Проверьте форму; настройка не сохранена');
+    });
+  });
+  p.setProperty(key,id);
+}
+function bridgeConfigureForm() {
+  var ui=SpreadsheetApp.getUi(),s=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var result=ui.prompt('Form ID листа «'+s.getName()+'»','Вставьте полный Form ID из TikTok, не число в E+. Только одна форма на лист: это значение будет передаваться для новых заявок и заменять повреждённый Form ID. Старые SENT не меняются.',ui.ButtonSet.OK_CANCEL);
+  if(result.getSelectedButton()!==ui.Button.OK)return;
+  var lock=LockService.getScriptLock();lock.waitLock(10000);
+  try{bridgeSetForm(s,result.getResponseText().trim());}finally{lock.releaseLock();}
+  ui.alert('Form ID закреплён за этим листом. Для строк без квитанции после проверки данных можно поставить RETRY. SENT повторно не отправляются.');
+}
+function bridgeApplyForm(sheet,h,row,rowNum) {
+  var id=PropertiesService.getScriptProperties().getProperty('sheet_form_id_'+sheet.getSheetId());if(!id)return '';
+  id=bridgeId(id);var changes=[];h.forEach(function(header,index){
+    if(bridgeHeaderKey(header)!=='formid')return;
+    var raw=row[index];
+    if(typeof raw==='string'&&/^\d{1,40}$/.test(raw.trim())&&raw.trim()!==id)throw Error('Form ID не совпадает с закреплённой формой листа');
+    if(typeof raw==='number'&&Number.isSafeInteger(raw)&&String(raw)!==id)throw Error('Form ID не совпадает с закреплённой формой листа');
+    if(raw!==''&&raw!==null&&raw!==undefined&&typeof raw!=='number'&&typeof raw!=='string')throw Error('Некорректный тип Form ID');
+    if(typeof raw==='string'&&raw.trim()&&!/^\d{1,40}$/.test(raw.trim())&&!/^\d+(?:[.,]\d+)?[eE]\+?\d+$/.test(raw.trim()))throw Error('Некорректный Form ID: проверьте запись из TikTok');
+    if(typeof raw==='number'&&(!Number.isFinite(raw)||raw<0||!Number.isInteger(raw)))throw Error('Некорректный Form ID: проверьте запись из TikTok');
+    if(raw!==id)changes.push(index);
+  });
+  changes.forEach(function(index){sheet.getRange(rowNum,index+1).setNumberFormat('@').setValue(id);row[index]=id;});
+  return id;
 }
 function bridgeSetup() {
   var s=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(),lock=LockService.getScriptLock();lock.waitLock(10000);
@@ -185,7 +222,8 @@ function bridgeTick() {
           else {
             var a=bridgeId(val('Lead ID')),b=bridgeId(val('TikTok Lead ID'));if(a&&b&&a!==b)throw Error('Колонки Lead ID расходятся');if(!a&&!b)continue;
             var body={lead_id:a||b,name:String(val('Name')||'Customer'),phone:bridgePhone(val('Phone'))};
-            var metadata=bridgeMetadata(h,row);Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
+            var form=bridgeApplyForm(s,h,row,rowNum);
+            var metadata=bridgeMetadata(h,row);if(form)metadata.form_id=form;Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
             write('Webhook_Status','PROCESSING');SpreadsheetApp.flush();
             var r=bridgeFetch(c,body);
             if([200,202,409].indexOf(r.code)<0)throw Error(r.data.message||'HTTP '+r.code);

@@ -80,6 +80,8 @@ const base = process.argv[2];
   await page.goto(base + '?page=setup');
   const script = await page.locator('#apps-script').inputValue();
   assert.ok(script.includes('function bridgeTextColumns('));
+  assert.ok(script.includes('function bridgeConfigureForm('));
+  assert.ok((await page.locator('main').innerText()).includes('Задать Form ID листа'));
   assert.ok((await page.locator('main').innerText()).includes('уже округлённые значения нужно восстановить из TikTok'));
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.getByRole('link', { name: 'Скачать LeadBridge.gs', exact: true }).focus();

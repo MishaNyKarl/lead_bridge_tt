@@ -2,10 +2,11 @@ const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/st
 const source=fs.readFileSync(__dirname+'/LeadBridge.gs','utf8');
 function env(rows,fetch,extraSheets=[]) {
   const props={BRIDGE_URL:'https://bridge.example.com/action.php',ROUTE_ID:'route_abc',BRIDGE_SECRET:'a'.repeat(64)};
-  const sheets=[rows,...extraSheets].map((rows,index)=>({getSheetId:()=>index+1,getName:()=>"Form "+(index+1),getLastColumn:()=>rows[0].length,getLastRow:()=>rows.length,getMaxRows:()=>100,getRange(r,c,n=1,m=1){return {getValues:()=>Array.from({length:n},(_,i)=>Array.from({length:m},(_,j)=>rows[r-1+i]?.[c-1+j]??'')),setValue(v){rows[r-1]??=[];rows[r-1][c-1]=v;return this;},setNumberFormat(){return this;}};}}));
+  const formats=[];
+  const sheets=[rows,...extraSheets].map((rows,index)=>({getSheetId:()=>index+1,getName:()=>"Form "+(index+1),getLastColumn:()=>rows[0].length,getLastRow:()=>rows.length,getMaxRows:()=>100,getRangeList(ranges){return {setNumberFormat(format){formats.push({sheet:index+1,ranges:[...ranges],format});return this;}};},getRange(r,c,n=1,m=1){return {getValues:()=>Array.from({length:n},(_,i)=>Array.from({length:m},(_,j)=>rows[r-1+i]?.[c-1+j]??'')),setValue(v){rows[r-1]??=[];rows[r-1][c-1]=v;return this;},setNumberFormat(){return this;}};}}));
   sheets.forEach(sheet=>props['sheet_config_'+sheet.getSheetId()]=JSON.stringify({BRIDGE_URL:props.BRIDGE_URL,ROUTE_ID:props.ROUTE_ID,BRIDGE_SECRET:props.BRIDGE_SECRET}));
   props.sheet_config_version='1';
-  const ctx={console,Date,Number,JSON,Error,String,Object,Array,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperty:(k,v)=>props[k]=v,getProperties:()=>props,deleteProperty:k=>delete props[k]})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheets:()=>sheets,getActiveSheet:()=>sheets[0]}),flush(){}},UrlFetchApp:{fetch:(url,o)=>{let r=fetch(JSON.parse(o.payload),o,url);return {getResponseCode:()=>r.code,getContentText:()=>JSON.stringify(r.data)};}}};vm.createContext(ctx);vm.runInContext(source,ctx);return {ctx,props,sheets};
+  const ctx={console,Date,Number,JSON,Error,String,Object,Array,PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperty:(k,v)=>props[k]=v,getProperties:()=>props,deleteProperty:k=>delete props[k]})},LockService:{getScriptLock:()=>({tryLock:()=>true,releaseLock(){}})},SpreadsheetApp:{getActiveSpreadsheet:()=>({getSheets:()=>sheets,getActiveSheet:()=>sheets[0]}),flush(){}},UrlFetchApp:{fetch:(url,o)=>{let r=fetch(JSON.parse(o.payload),o,url);return {getResponseCode:()=>r.code,getContentText:()=>JSON.stringify(r.data)};}}};vm.createContext(ctx);vm.runInContext(source,ctx);return {ctx,props,sheets,formats};
 }
 const headers=['Lead ID','Phone','Name','Campaign ID','Ad ID','Ad Group ID','Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt'];
 let calls=0,rows=[headers.slice(),['9000000000000000001','+254700000001','Test','9000000000000000002','3','4','','','','','']];
@@ -106,3 +107,33 @@ e.ctx.bridgeTick();assert.equal(history[1][6],'SENT');
 // Fresh empty tab can change campaign before any lead arrives.
 e=env([['Lead ID','Phone']],()=>({code:200,data:{status:'ok'}}));e.ctx.bridgeSaveSheetConfig(e.sheets[0],config);assert.equal(e.ctx.bridgeConfig(e.sheets[0]).ROUTE_ID,'route_def');
 console.log('PASS: legacy migration, unconfigured copies skipped, explicit per-sheet setup, history protection, secret rotation');
+
+// Format the entire available column range before exports, including empty tabs and aliases.
+const precisionHeaders=['Lead ID','Phone','Form ID','Adset ID','ADID_V2','Notes'];
+e=env([precisionHeaders.slice()],()=>{throw Error('Empty tabs must not send');},[[...['Lead ID','Phone']]]);
+delete e.props.sheet_config_2;e.ctx.bridgeTick();
+assert.deepEqual(e.formats,[{sheet:1,ranges:['A1:A100','B1:B100','C1:C100','D1:D100','E1:E100','H1:H100','I1:I100','K1:K100'],format:'@'}]);
+const damaged=[precisionHeaders.slice(),['9000000000000000001','+254700000001',9000000000000000002,'1','2','']];
+e=env(damaged,()=>{throw Error('Formatting must not hide lost precision');});e.ctx.bridgeTick();
+assert.equal(damaged[1][damaged[0].indexOf('Webhook_Status')],'REVIEW');
+assert.match(damaged[1][damaged[0].indexOf('Webhook_Message')],/Form ID: ID округлён/);
+assert.equal(typeof damaged[1][2],'number');
+e=env([['Lead ID','Phone']],()=>({code:200,data:{status:'ok'}}));
+e.ctx.bridgeSaveSheetConfig(e.sheets[0],{BRIDGE_URL:e.props.BRIDGE_URL,ROUTE_ID:'route_abc',BRIDGE_SECRET:'a'.repeat(64)});
+assert.ok(e.formats.some(f=>f.ranges.includes('A1:A100')&&f.ranges.includes('B1:B100')));
+e.sheets[0].getMaxRows=()=>200;e.formats.length=0;e.ctx.bridgeTick();
+assert.ok(e.formats[0].ranges.includes('A1:A200'));
+const wide=Array.from({length:28},(_,i)=>'Notes '+i);wide[0]='Lead ID';wide[1]='Phone';wide[26]='Form ID';wide[27]='ad_group_id';
+e=env([wide],()=>{throw Error('Empty tab must not send');});e.ctx.bridgeTick();
+assert.ok(e.formats[0].ranges.includes('AA1:AA100'));assert.ok(e.formats[0].ranges.includes('AB1:AB100'));
+console.log('PASS: text columns prepared on configure and empty ticks, aliases and columns after Z, capacity growth, unconfigured tabs skipped, rounded numbers still rejected with field name');
+
+// Enabling the single trigger prepares every configured tab before scheduling any sends.
+e=env([['Lead ID','Phone']],()=>{throw Error('Enabling must not send');},[[ 'Lead ID','Phone' ],['Notes']].map(h=>[h]));
+delete e.props.sheet_config_3;
+let created=0;
+e.ctx.LockService.getScriptLock=()=>({waitLock(){},releaseLock(){}});
+e.ctx.SpreadsheetApp.getUi=()=>({Button:{YES:'yes'},ButtonSet:{YES_NO:'yes_no'},alert:()=> 'yes'});
+e.ctx.ScriptApp={getProjectTriggers:()=>[],newTrigger(name){assert.equal(name,'bridgeTick');assert.equal(e.formats.length,2);return {timeBased(){return this;},everyMinutes(n){assert.equal(n,1);return this;},create(){created++;}};}};
+e.ctx.bridgeEnable();assert.equal(created,1);assert.deepEqual(e.formats.map(f=>f.sheet),[1,2]);
+console.log('PASS: enabling prepares all configured sheets before creating one shared trigger, no lead submissions');

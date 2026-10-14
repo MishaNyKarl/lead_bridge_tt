@@ -40,6 +40,7 @@ function bridgeSaveSheetConfig(sheet,c) {
   }
   var check=bridgeFetch(c,{op:'check'});
   if(check.code!==200 || check.data.status!=='ok')throw Error('Не удалось проверить подключение');
+  bridgePrepareSheet(sheet);SpreadsheetApp.flush();
   var p=PropertiesService.getScriptProperties(),id=sheet.getSheetId();
   p.setProperty('sheet_config_'+id,JSON.stringify(c));
   if(!old || changed)['cursor_','work_cursor_','partner_cursor_'].forEach(function(prefix){p.deleteProperty(prefix+id);});
@@ -63,12 +64,23 @@ function bridgeHeaders(sheet, prepare) {
   var h=sheet.getRange(1,1,1,sheet.getLastColumn()).getValues()[0].map(function(x){return String(x).trim();});
   if(h.indexOf('Phone')<0 || (h.indexOf('Lead ID')<0 && h.indexOf('TikTok Lead ID')<0))return null;
   if(prepare) ['Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt','TikTok Lead Status','Partner Status Updated'].forEach(function(k){if(h.indexOf(k)<0){h.push(k);sheet.getRange(1,h.length,sheet.getMaxRows(),1).setNumberFormat('@');sheet.getRange(1,h.length).setValue(k);}});
+  if(prepare)bridgeTextColumns(sheet,h);
   if(h.indexOf('Webhook_Status')<0 || h.indexOf('Bridge Receipt')<0)throw Error('Сначала выполните подготовку таблицы');
   return h;
 }
+function bridgeHeaderKey(value){return String(value).trim().toLowerCase().replace(/[ _-]/g,'');}
+function bridgeTextColumns(sheet,h) {
+  // Apply to empty cells too, before the next export. Formatting cannot repair an existing Number.
+  var names=['Lead ID','TikTok Lead ID','Phone','Campaign ID','Ad ID','Ad Group ID','Adgroup ID','Adset ID','Advertiser ID','Form ID','ADID_V2','Binom Click ID','Partner Reference ID','Bridge Receipt'].map(bridgeHeaderKey);
+  var ranges=[],max=sheet.getMaxRows();h.forEach(function(name,i){
+    if(names.indexOf(bridgeHeaderKey(name))<0)return;
+    var column='',n=i+1;while(n){n--;column=String.fromCharCode(65+n%26)+column;n=Math.floor(n/26);}
+    ranges.push(column+'1:'+column+max);
+  });
+  if(ranges.length)sheet.getRangeList(ranges).setNumberFormat('@');
+}
 function bridgePrepareSheet(s) {
   var h=bridgeHeaders(s,true);if(!h)throw Error('На выбранном листе нужны Phone и Lead ID / TikTok Lead ID');
-  ['Lead ID','TikTok Lead ID','Phone','Campaign ID','Ad ID','Ad Group ID','Advertiser ID','Form ID','ADID_V2','Binom Click ID','Partner Reference ID','Bridge Receipt'].forEach(function(k){var i=h.indexOf(k);if(i>=0)s.getRange(1,i+1,s.getMaxRows(),1).setNumberFormat('@');});
 }
 function bridgeSetup() {
   var s=SpreadsheetApp.getActiveSpreadsheet().getActiveSheet(),lock=LockService.getScriptLock();lock.waitLock(10000);
@@ -78,7 +90,7 @@ function bridgeSetup() {
     if(!c)throw Error('Этот лист ещё не подключён. Откройте Lead Bridge → Настроить и вставьте JSON его связки');
     r=bridgeFetch(c,{op:'check'});
     if(r.code!==200 || r.data.status!=='ok')throw Error('Ошибка подключения');
-    bridgePrepareSheet(s);
+    bridgePrepareSheet(s);SpreadsheetApp.flush();
   } finally {lock.releaseLock();}
   SpreadsheetApp.getUi().alert('Лист «'+s.getName()+'» подготовлен. Связка '+(r.data.active?'активна':'на паузе')+'. Лиды не отправлялись. Остальные листы настраиваются отдельно; триггер общий.');
 }
@@ -96,7 +108,9 @@ function bridgeEnable() {
   var lock=LockService.getScriptLock();lock.waitLock(10000);
   try {
     bridgeMigrateSheets();
-    if(!SpreadsheetApp.getActiveSpreadsheet().getSheets().some(function(s){return !!bridgeConfig(s);}))throw Error('Сначала настройте хотя бы один лист через Lead Bridge → Настроить');
+    var configured=SpreadsheetApp.getActiveSpreadsheet().getSheets().filter(function(s){return !!bridgeConfig(s);});
+    if(!configured.length)throw Error('Сначала настройте хотя бы один лист через Lead Bridge → Настроить');
+    configured.forEach(bridgePrepareSheet);SpreadsheetApp.flush();
     bridgeDisable();ScriptApp.newTrigger('bridgeTick').timeBased().everyMinutes(1).create();
   } finally {lock.releaseLock();}
 }
@@ -113,10 +127,9 @@ function bridgeId(raw) {
 function bridgePhone(raw){var s=String(raw||'').trim();if(/[eE]/.test(s))throw Error('Телефон повреждён');var d=s.replace(/[^0-9]/g,'').replace(/^00/,'');if(!/^[1-9][0-9]{6,14}$/.test(d))throw Error('Телефон должен содержать код страны');return '+'+d;}
 // Alias matching is case-insensitive and ignores spaces/underscores; conflicting values fail closed.
 function bridgeMetaValue(h,row,names,id) {
-  var normalize=function(v){return String(v).trim().toLowerCase().replace(/[ _-]/g,'');};
-  var accepted=names.map(normalize),values=[];
-  h.forEach(function(header,i){if(accepted.indexOf(normalize(header))>=0 && row[i]!=='' && row[i]!==null && row[i]!==undefined){
-    var value=id?bridgeId(row[i]):String(row[i]).trim();
+  var accepted=names.map(bridgeHeaderKey),values=[];
+  h.forEach(function(header,i){if(accepted.indexOf(bridgeHeaderKey(header))>=0 && row[i]!=='' && row[i]!==null && row[i]!==undefined){
+    var value;try{value=id?bridgeId(row[i]):String(row[i]).trim();}catch(error){throw Error(header+': '+error.message);}
     if(value && values.indexOf(value)<0)values.push(value);
   }});
   if(values.length>1)throw Error('Разные значения в колонках '+names.join(' / '));

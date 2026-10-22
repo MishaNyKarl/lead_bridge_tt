@@ -2,16 +2,17 @@ const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/st
 const source=fs.readFileSync(__dirname+'/LeadBridge.gs','utf8');
 function env(rows,fetch,extraSheets=[]) {
   const props={BRIDGE_URL:'https://bridge.example.com/action.php',ROUTE_ID:'route_abc',BRIDGE_SECRET:'a'.repeat(64)};
-  const outputs=['Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt','TikTok Lead Status','Partner Status Updated'];
+  const outputs=['Webhook_Status','Binom Click ID','Partner Reference ID','Webhook_Message','Bridge Receipt','TikTok Lead Status','Partner Status Updated','Bridge Warning'];
   const sheets=[rows,...extraSheets].map((rows,index)=>({
     getSheetId:()=>index+1,getName:()=>"Form "+(index+1),getLastColumn:()=>rows[0].length,getLastRow:()=>rows.length,maxRows:100,
-    getMaxRows(){return this.maxRows;},
+    getMaxRows(){return this.maxRows;},fontColors:{},
     insertRowsAfter(){throw Error('Connector must not allocate input rows');},
     getRangeList(){throw Error('Connector must not format input ranges');},
     getRange(r,c,n=1,m=1){return {
       getValues:()=>Array.from({length:n},(_,i)=>Array.from({length:m},(_,j)=>rows[r-1+i]?.[c-1+j]??'')),
       setValue(v){assert.ok(outputs.includes(r===1?v:rows[0][c-1]),'Only output columns may be written');rows[r-1]??=[];rows[r-1][c-1]=v;return this;},
-      setNumberFormat(){throw Error('Connector must not change cell formats');}
+      setNumberFormat(){throw Error('Connector must not change cell formats');},
+      setFontColor(v){assert.ok(['Lead ID','TikTok Lead ID'].includes(rows[0][c-1]),'Only lead IDs may be highlighted');sheets[index].fontColors[r+':'+c]=v;return this;}
     };}
   }));
   sheets.forEach(sheet=>props['sheet_config_'+sheet.getSheetId()]=JSON.stringify({BRIDGE_URL:props.BRIDGE_URL,ROUTE_ID:props.ROUTE_ID,BRIDGE_SECRET:props.BRIDGE_SECRET}));
@@ -118,23 +119,60 @@ e.ctx.bridgeTick();assert.equal(history[1][6],'SENT');
 e=env([['Lead ID','Phone']],()=>({code:200,data:{status:'ok'}}));e.ctx.bridgeSaveSheetConfig(e.sheets[0],config);assert.equal(e.ctx.bridgeConfig(e.sheets[0]).ROUTE_ID,'route_def');
 console.log('PASS: legacy migration, unconfigured copies skipped, explicit per-sheet setup, history protection, secret rotation');
 
-// Even damaged source values remain untouched; reject unsafe IDs without rewriting them.
+// Damaged optional Form ID does not block delivery; source values/formats stay untouched.
 const precisionHeaders=['Lead ID','Phone','Form ID','Adset ID','ADID_V2','Notes'];
 e=env([precisionHeaders.slice()],()=>{throw Error('Empty tabs must not send');},[[...['Lead ID','Phone']]]);
 delete e.props.sheet_config_2;e.ctx.bridgeTick();
 assert.equal(e.sheets[0].maxRows,100);
 const damaged=[precisionHeaders.slice(),['9000000000000000001','+254700000001',9000000000000000002,'1','2','']];
-e=env(damaged,()=>{throw Error('Formatting must not hide lost precision');});e.ctx.bridgeTick();
-assert.equal(damaged[1][damaged[0].indexOf('Webhook_Status')],'REVIEW');
-assert.match(damaged[1][damaged[0].indexOf('Webhook_Message')],/Form ID: ID округлён/);
+let damagedSends=0;
+e=env(damaged,body=>{damagedSends++;assert.ok(!('form_id' in body));return {code:202,data:{status:'processing',receipt:'damaged-form'}};});e.ctx.bridgeTick();
+assert.equal(damagedSends,1);
+assert.equal(damaged[1][damaged[0].indexOf('Webhook_Status')],'QUEUED');
+assert.match(damaged[1][damaged[0].indexOf('Bridge Warning')],/Form ID: ID округлён/);
+assert.equal(e.sheets[0].fontColors['2:1'],'#b91c1c');
 assert.equal(typeof damaged[1][2],'number');
+e.ctx.UrlFetchApp.fetch=(url,o)=>{const body=JSON.parse(o.payload);assert.equal(body.op,'status');return {getResponseCode:()=>200,getContentText:()=>JSON.stringify({results:{'damaged-form':{status:'success',stage:'sent',click_id:'c',partner_reference_id:'p',receipt:'damaged-form'}}})};};
+e.ctx.bridgeTick();assert.equal(damaged[1][damaged[0].indexOf('Webhook_Status')],'SENT');
+assert.match(damaged[1][damaged[0].indexOf('Bridge Warning')],/Form ID/);
+e.ctx.bridgeTick();assert.equal(damagedSends,1);
 e=env([['Lead ID','Phone']],()=>({code:200,data:{status:'ok'}}));
 e.ctx.bridgeSaveSheetConfig(e.sheets[0],{BRIDGE_URL:e.props.BRIDGE_URL,ROUTE_ID:'route_abc',BRIDGE_SECRET:'a'.repeat(64)});
 assert.equal(e.sheets[0].maxRows,100);e.ctx.bridgeTick();
 const wide=Array.from({length:28},(_,i)=>'Notes '+i);wide[0]='Lead ID';wide[1]='Phone';wide[26]='Form ID';wide[27]='ad_group_id';
 e=env([wide],()=>{throw Error('Empty tab must not send');});e.ctx.bridgeTick();
 assert.equal(wide[26],'Form ID');assert.equal(wide[27],'ad_group_id');
-console.log('PASS: configure and ticks leave source columns/formats and row count unchanged, unsafe IDs still rejected with field name');
+console.log('PASS: damaged Form ID omitted, red Lead ID and persistent warning through QUEUED/SENT, no replay, source values/formats unchanged');
+
+// Missing IDs are normal; exponent strings, unsafe numbers and conflicting aliases warn.
+for(const value of ['7.69907E+18','invalid',-1,9000000000000000123]){
+  const input=[['TikTok Lead ID','Phone','Form ID'],['9000000000000000001','+254700000001',value]];
+  e=env(input,body=>{assert.equal(body.lead_id,input[1][0]);assert.ok(!('form_id' in body));return {code:200,data:{status:'success',stage:'sent',click_id:'c',partner_reference_id:'p',receipt:'warn'}};});
+  e.ctx.bridgeTick();assert.equal(input[1][input[0].indexOf('Webhook_Status')],'SENT');assert.equal(input[1][2],value);assert.equal(e.sheets[0].fontColors['2:1'],'#b91c1c');
+}
+assert.equal(e.ctx.bridgeFormId(['Form ID'],['']).warning,'');
+assert.equal(e.ctx.bridgeFormId(['Lead ID'],['1']).warning,'');
+assert.match(e.ctx.bridgeFormId(['Form ID','FORM_ID'],['1','2']).warning,/Разные значения/);
+assert.equal(e.ctx.bridgeMetadata(['Form ID','FORM_ID'],['1','2']).form_id,undefined);
+assert.equal(e.ctx.bridgeMetadata(['Form ID'],['9000000000000000123']).form_id,'9000000000000000123');
+// Corrected pending rows clear only the warning/highlight; polling never re-enqueues.
+const corrected=[['Lead ID','Phone','Form ID','Bridge Receipt','Webhook_Status','Bridge Warning'],['1','+254700000001','123','saved','QUEUED','old warning']];
+e=env(corrected,body=>{assert.equal(body.op,'status');return {code:200,data:{results:{saved:{status:'processing',receipt:'saved'}}}};});
+e.ctx.bridgeTick();assert.equal(corrected[1][5],'');assert.equal(e.sheets[0].fontColors['2:1'],null);
+// Protected font formatting must not turn a successful send into REVIEW.
+const protectedRow=[['Lead ID','Phone','Form ID'],['1','+254700000001','7.69907E+18']];
+e=env(protectedRow,()=>({code:202,data:{status:'processing',receipt:'protected'}}));
+const originalRange=e.sheets[0].getRange;
+e.sheets[0].getRange=function(...args){const range=originalRange.apply(this,args);range.setFontColor=()=>{throw Error('Protected');};return range;};
+e.ctx.console={error(){}};e.ctx.bridgeTick();assert.equal(protectedRow[1][protectedRow[0].indexOf('Webhook_Status')],'QUEUED');
+assert.match(protectedRow[1][protectedRow[0].indexOf('Bridge Warning')],/Form ID/);
+// Unsafe required Lead ID and other metadata IDs still block, even with a bad Form ID.
+for(const bad of ['Lead ID','Campaign ID','Ad ID','Ad Group ID','Advertiser ID','ADID_V2']){
+  const input=[['Lead ID','Phone','Form ID',...(bad==='Lead ID'?[]:[bad])],['1','+254700000001','7.69907E+18',...(bad==='Lead ID'?[]:[9000000000000000123])]];
+  if(bad==='Lead ID')input[1][0]=9000000000000000123;
+  e=env(input,()=>{throw Error('Unsafe identity must not send');});e.ctx.bridgeTick();assert.equal(input[1][input[0].indexOf('Webhook_Status')],'REVIEW');
+}
+console.log('PASS: optional malformed/conflicting/missing/exact Form IDs, warning cleanup, protected styling, required and other ID checks remain strict');
 
 // Enabling the single trigger prepares every configured tab before scheduling any sends.
 e=env([['Lead ID','Phone']],()=>{throw Error('Enabling must not send');},[[ 'Lead ID','Phone' ],['Notes']].map(h=>[h]));
@@ -154,7 +192,8 @@ const before=sourceRows.map(r=>r.slice(0,3));e.ctx.bridgePrepareSheet(e.sheets[0
 assert.deepEqual(sourceRows.map(r=>r.slice(0,3)),before);
 assert.equal(e.sheets[0].maxRows,100);
 e.props.sheet_form_id_1='1111111111111111111';
-assert.throws(()=>e.ctx.bridgeMetadata(['Form ID'],[9000000000000000123]),/округлён/);
+assert.equal(e.ctx.bridgeMetadata(['Form ID'],[9000000000000000123]).form_id,undefined);
+assert.match(e.ctx.bridgeFormId(['Form ID'],[9000000000000000123]).warning,/округлён/);
 assert.equal(typeof e.ctx.bridgeConfigureForm,'undefined');
 assert.ok(!source.includes('bridgeApplyForm'));
 // Once a connector appends an exact string, forward it unchanged as a string.

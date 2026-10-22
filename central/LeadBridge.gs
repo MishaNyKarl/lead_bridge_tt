@@ -1,5 +1,5 @@
 // Lead Bridge central connector. Read TikTok input without changing its values or formats.
-var BRIDGE_SCRIPT_VERSION='1.14.1';
+var BRIDGE_SCRIPT_VERSION='1.14.2';
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Lead Bridge')
     .addItem('Настроить', 'bridgeConfigure')
@@ -126,7 +126,11 @@ function bridgeMetaValue(h,row,names,id) {
   return values[0]||'';
 }
 function bridgeFormId(h,row) {
-  try {return {value:bridgeMetaValue(h,row,['Form ID'],true),warning:''};}
+  // Explicit text columns take precedence only on rows where they contain data.
+  // Keep old rows readable; never use a legacy ID to conceal a broken new value.
+  var names=['Form ID text','Form ID text test'],keys=names.map(bridgeHeaderKey);
+  var hasText=h.some(function(header,i){return keys.indexOf(bridgeHeaderKey(header))>=0 && row[i]!=='' && row[i]!==null && row[i]!==undefined;});
+  try {return {value:bridgeMetaValue(h,row,hasText?names:['Form ID'],true),warning:''};}
   catch(error){return {value:'',warning:'Form ID повреждён или неоднозначен: поле не передано; отправка лида не блокируется. '+error.message};}
 }
 function bridgeMetadata(h,row,form) {

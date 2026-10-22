@@ -174,6 +174,20 @@ for(const bad of ['Lead ID','Campaign ID','Ad ID','Ad Group ID','Advertiser ID',
 }
 console.log('PASS: optional malformed/conflicting/missing/exact Form IDs, warning cleanup, protected styling, required and other ID checks remain strict');
 
+// New text-column names support deployed test sheets and take explicit per-row priority.
+for(const name of ['Form ID text','Form ID text test','FORM_ID_TEXT']){
+  const input=[['Lead ID','Phone','Form ID',name],['1','+254700000001',9000000000000000123,'9000000000000000123']];
+  e=env(input,body=>{assert.equal(body.form_id,'9000000000000000123');return {code:202,data:{status:'processing',receipt:'text-column'}};});
+  e.ctx.bridgeTick();assert.equal(input[1][input[0].indexOf('Webhook_Status')],'QUEUED');assert.equal(input[1][input[0].indexOf('Bridge Warning')],'');assert.equal(typeof input[1][2],'number');
+}
+assert.equal(e.ctx.bridgeFormId(['Form ID','Form ID text'],['123','']).value,'123');
+assert.equal(e.ctx.bridgeFormId(['Form ID','Form ID text'],['123','456']).value,'456');
+assert.match(e.ctx.bridgeFormId(['Form ID','Form ID text'],['123','7.69907E+18']).warning,/Form ID text/);
+assert.equal(e.ctx.bridgeFormId(['Form ID','Form ID text'],['123','7.69907E+18']).value,'');
+assert.match(e.ctx.bridgeFormId(['Form ID text','Form ID text test'],['123','456']).warning,/Разные значения/);
+assert.equal(e.ctx.bridgeFormId(['Form ID text','Form ID text test'],['123','123']).value,'123');
+console.log('PASS: text header aliases, exact outgoing form_id, legacy fallback only for empty text fields, bad/conflicting text fields warn without guessing');
+
 // Enabling the single trigger prepares every configured tab before scheduling any sends.
 e=env([['Lead ID','Phone']],()=>{throw Error('Enabling must not send');},[[ 'Lead ID','Phone' ],['Notes']].map(h=>[h]));
 delete e.props.sheet_config_3;

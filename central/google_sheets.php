@@ -11,6 +11,28 @@ function googleSchema(): void {
 function googleConfig(): array {return setting('google_config')?unseal(setting('google_config')):[];}
 function googleReady(): bool {$c=googleConfig();return !empty($c['client_id'])&&!empty($c['client_secret'])&&!empty($c['picker_key'])&&!empty($c['project']);}
 function googleCallbackUrl(): string {return rtrim(setting('base_url'),'/').'/?google=callback';}
+function googleErrorMessage(int $code,array $data,string $url): string {
+    // Only known reason codes/service names may leave the provider response.
+    // Its free-text message, metadata, tokens and file/user details remain private.
+    $error=$data['error']??null;$reasons=[];$service='Google API';
+    if(is_array($error)){
+        foreach(array_merge(is_array($error['details']??null)?$error['details']:[],is_array($error['errors']??null)?$error['errors']:[]) as $item){
+            if(!is_array($item))continue;if(is_string($item['reason']??null))$reasons[]=$item['reason'];
+            $known=['sheets.googleapis.com'=>'Google Sheets API','drive.googleapis.com'=>'Google Drive API','picker.googleapis.com'=>'Google Picker API'];
+            $metadata=is_array($item['metadata']??null)?$item['metadata']:[];$s=$metadata['service']??'';if(is_string($s)&&isset($known[$s]))$service=$known[$s];
+        }
+    }elseif($error==='invalid_grant')return 'Google: разрешение личного Google-аккаунта баера истекло или отозвано. Нажмите «Переподключить мой Google».';
+    elseif($error==='invalid_client')return 'Google: не приняты реквизиты общего приложения Lead Bridge. Администратору нужно проверить Client ID и Client secret; смена Google-аккаунта баера это не исправит.';
+    if($service==='Google API'&&str_starts_with($url,'https://sheets.googleapis.com/'))$service='Google Sheets API';
+    if(array_intersect($reasons,['SERVICE_DISABLED','accessNotConfigured']))return 'Google: '.$service.' не включён в общем Google Cloud проекте Lead Bridge (HTTP '.$code.'). Администратору нужно открыть APIs & Services → Library и включить этот API. Переподключение Google баера не заменяет эту настройку.';
+    if(array_intersect($reasons,['ACCESS_TOKEN_SCOPE_INSUFFICIENT','insufficientPermissions']))return 'Google: личному Google-аккаунту баера не выдано нужное разрешение (HTTP '.$code.'). Нажмите «Переподключить мой Google» и предоставьте доступ к файлам Lead Bridge (drive.file).';
+    if(array_intersect($reasons,['RATE_LIMIT_EXCEEDED','rateLimitExceeded','userRateLimitExceeded','dailyLimitExceeded'])||$code===429)return 'Google: достигнут лимит API (HTTP '.$code.'). Подождите и повторите действие вручную. Переподключать аккаунт не требуется.';
+    if(in_array('storageQuotaExceeded',$reasons,true))return 'Google: в Google Drive баера закончилось свободное место (HTTP '.$code.'). Освободите место или подключите другой свой Google-аккаунт.';
+    if(in_array('domainPolicy',$reasons,true))return 'Google: действие запрещено политикой Google Workspace (HTTP '.$code.'). Обратитесь к администратору Google-аккаунта баера.';
+    if($code===401)return 'Google: доступ личного Google-аккаунта баера недействителен (HTTP 401). Нажмите «Переподключить мой Google».';
+    if($code===403)return 'Google запретил действие (HTTP 403). Используется личный Google-аккаунт баера. Проверьте его права и разрешение drive.file, а также включение Google Sheets API в общем Google Cloud проекте Lead Bridge. При изменении разрешений нажмите «Переподключить мой Google».';
+    return 'Google: запрос не подтверждён (HTTP '.$code.'). Если создавали таблицу, проверьте Google Drive перед новой попыткой.';
+}
 function googleJson(string $url,?array $body=null,?string $token=null,?callable $http=null,bool $form=false): array {
     if($http===null&&defined('BRIDGE_TEST')&&isset($GLOBALS['google_http']))$http=$GLOBALS['google_http'];
     $headers=$token?['Authorization: Bearer '.$token]:[];
@@ -18,7 +40,7 @@ function googleJson(string $url,?array $body=null,?string $token=null,?callable 
     $r=($http??'httpRequest')($url,$body===null?null:($form?http_build_query($body):json_encode($body,JSON_THROW_ON_ERROR)),$headers);
     $d=json_decode($r['body'],true);
     // Never expose Google's body: it can contain credentials or personal data.
-    if($r['error']||$r['code']<200||$r['code']>=300||!is_array($d)||isset($d['error']))throw new InvalidArgumentException('Google: запрос не подтверждён (HTTP '.(int)$r['code'].'). Проверьте доступ или подключите Google заново.',(int)$r['code']);
+    if($r['error']||$r['code']<200||$r['code']>=300||!is_array($d)||isset($d['error']))throw new InvalidArgumentException(googleErrorMessage((int)$r['code'],is_array($d)?$d:[],$url),(int)$r['code']);
     return $d;
 }
 function googleSaveAccount(string $owner,array $data): void {googleSchema();sql('INSERT INTO google_accounts VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET data=excluded.data',[$owner,seal($data)]);}
@@ -34,14 +56,23 @@ function googleToken(string $owner,?callable $http=null): string {
     $changed=sql('UPDATE google_accounts SET data=? WHERE owner=? AND data=?',[seal($a),$owner,$raw]);
     if($changed->rowCount()!==1)throw new InvalidArgumentException('Google-подключение изменилось. Обновите страницу.');return $a['access_token'];
 }
+function googleReturnPath(string $route): string {
+    if($route==='')return '?page=setup';$u=requireUser();uiEntity($route,'route');
+    if(ownerOf($route)!==$u['id'])throw new InvalidArgumentException('Переподключить Google для связки может только её владелец');
+    return '?page=route&edit='.rawurlencode($route);
+}
+function googleReconnectForm(string $route=''): void {
+    echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><input type="hidden" name="route" value="'.h($route).'"><button class="secondary"'.(googleReady()?'':' disabled').'>Переподключить мой Google</button></form>';
+}
 function googleBegin(): never {
     $u=requireUser();if(!googleReady())throw new InvalidArgumentException('Администратор ещё не настроил подключение Google');
     if(!empty($u['sso_migration']))throw new InvalidArgumentException('Сначала свяжите аккаунт с OpsVault');
+    $route=clean($_POST['route']??'',80);googleReturnPath($route);
     $verifier=bin2hex(random_bytes(32));$state=bin2hex(random_bytes(32));$c=googleConfig();
-    $_SESSION['google_attempt']=['state'=>$state,'verifier'=>$verifier,'expires'=>time()+600,'owner'=>$u['id'],'config'=>seal($c)];
+    $_SESSION['google_attempt']=['state'=>$state,'verifier'=>$verifier,'expires'=>time()+600,'owner'=>$u['id'],'config'=>seal($c),'route'=>$route];
     redirect('https://accounts.google.com/o/oauth2/v2/auth?'.http_build_query(['client_id'=>$c['client_id'],'redirect_uri'=>googleCallbackUrl(),'response_type'=>'code','scope'=>GOOGLE_FILE_SCOPE,'access_type'=>'offline','prompt'=>'consent select_account','state'=>$state,'code_challenge'=>rtrim(strtr(base64_encode(hash('sha256',$verifier,true)),'+/','-_'),'='),'code_challenge_method'=>'S256']));
 }
-function googleFinish(?callable $http=null): void {
+function googleFinish(?callable $http=null): string {
     $u=requireUser();$a=$_SESSION['google_attempt']??[];unset($_SESSION['google_attempt']);
     if(!empty($u['sso_migration']))throw new InvalidArgumentException('Сначала свяжите аккаунт с OpsVault');
     if(($a['expires']??0)<time()||($a['owner']??'')!==$u['id']||!is_string($_GET['state']??null)||!hash_equals($a['state']??'',$_GET['state']))throw new InvalidArgumentException('Подключение Google истекло. Начните заново.');
@@ -49,6 +80,7 @@ function googleFinish(?callable $http=null): void {
     $d=googleJson('https://oauth2.googleapis.com/token',['code'=>$code,'client_id'=>$c['client_id'],'client_secret'=>$c['client_secret'],'redirect_uri'=>googleCallbackUrl(),'grant_type'=>'authorization_code','code_verifier'=>$a['verifier']],http:$http,form:true);
     if(!is_string($d['access_token']??null)||!is_string($d['refresh_token']??null)||empty($d['expires_in'])||!in_array(GOOGLE_FILE_SCOPE,explode(' ',$d['scope']??''),true))throw new InvalidArgumentException('Google не предоставил постоянный доступ к выбранным файлам. Подключитесь заново.');
     googleSaveAccount($u['id'],['access_token'=>$d['access_token'],'refresh_token'=>$d['refresh_token'],'expires'=>time()+min(3600,(int)$d['expires_in'])]);audit('google_connected');
+    try{return googleReturnPath($a['route']??'');}catch(InvalidArgumentException $e){return '?page=setup';}
 }
 function googleLanding(): never {
     // Commit an own-origin document before returning to the Strict panel session.
@@ -152,6 +184,7 @@ function googleRouteControls(string $routeId): void {
     googleSchema();$u=requireUser();uiEntity($routeId,'route');
     echo '<h2>Google-таблица для связки</h2><p><a class="button secondary" href="?page=setup&amp;route='.h($routeId).'">Подключить таблицу автоматически</a></p>';
     if(ownerOf($routeId)!==$u['id']){echo '<p>Новая таблица создаётся владельцем связки в его Google-аккаунте.</p>';return;}
+    googleReconnectForm($routeId);echo '<p class="muted">Переподключается ваш личный Google-аккаунт баера. После входа Google вернёт вас в эту связку. Создание таблицы автоматически не повторяется.</p>';
     $op=sql('SELECT * FROM sheet_creations WHERE owner=? AND route=?',[$u['id'],$routeId])->fetch();
     if($op){$d=unseal($op['data']);if(!empty($d['book']))echo '<p><a href="https://docs.google.com/spreadsheets/d/'.h($d['book']).'/edit" target="_blank" rel="noopener noreferrer">Открыть созданную таблицу ↗</a></p>';}
     if($op&&$op['phase']==='ready'){echo '<p>Таблица создана и привязана к этой связке. Управление отправкой — в разделе «Подключение».</p>';return;}
@@ -270,7 +303,7 @@ function googleMutation(string $op): bool {
 function googlePersonalSettings(): void {
     googleSchema();$u=requireUser();$connected=(bool)sql('SELECT 1 FROM google_accounts WHERE owner=?',[$u['id']])->fetchColumn();$ready=googleReady();
     echo '<div class="card"><h2>Мой Google-аккаунт</h2><p>Каждый баер подключает свой Google-аккаунт. Его подключение и выбранные таблицы привязаны к его аккаунту Lead Bridge.</p><p role="status">'.($connected?'Ваш Google-аккаунт подключён.':'Вы ещё не подключили свой Google-аккаунт.').'</p>';
-    echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button'.($ready?'':' disabled').'>'.($connected?'Выбрать другой Google-аккаунт':'Подключить мой Google-аккаунт').'</button></form>';
+    echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button'.($ready?'':' disabled').'>'.($connected?'Переподключить мой Google':'Подключить мой Google-аккаунт').'</button></form>';
     if(!$ready)echo '<p class="muted">Подключение пока недоступно: администратору нужно настроить Google-приложение Lead Bridge один раз для всех баеров. После этого каждый войдёт в свой Google. Пароль от Google вводится только на странице Google.</p>';
     if($connected)echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_disconnect"><button class="secondary">Отключить мой Google и остановить мои таблицы</button></form>';
     echo '<p><a href="?page=setup">Перейти к подключению моих таблиц →</a></p></div>';
@@ -288,6 +321,7 @@ function googleSetupPage(): void {
     elseif(!$connected)echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button>Подключить мой Google-аккаунт</button></form><p class="muted">Войдите в свой Google. Доступ предоставляется только к файлам, выбранным для Lead Bridge.</p>';
     else{
         echo '<button type="button" id="google-picker">Выбрать таблицу</button><p id="google-picker-status" role="status" aria-live="polite"></p><form method="post" id="google-inspect" hidden>'.csrf().'<input type="hidden" name="op" value="google_inspect"><input type="hidden" name="spreadsheet" id="google-book-id"></form>';
+        googleReconnectForm((string)($_GET['route']??''));
         $pending=$_SESSION['google_book']??null;
         if($pending){$tabs=[];foreach($pending['book']['sheets'] as $tab)$tabs[(string)$tab['properties']['sheetId']]=$tab['properties']['title'];
             echo '<h3>'.h($pending['book']['properties']['title']).'</h3><form method="post">'.csrf().'<input type="hidden" name="op" value="google_connect"><input type="hidden" name="spreadsheet" value="'.h($pending['id']).'">';options('sheet','Лист',$tabs);options('route','Связка',[''=>'Выберите связку']+array_filter(uiEntities('route'),fn($r,$id)=>ownerOf($id)===$u['id'],ARRAY_FILTER_USE_BOTH),(string)($_GET['route']??''));options('history','Существующие строки',['new'=>'Только новые заявки после подключения','all'=>'Обрабатывать также существующие строки']);echo '<button>Подготовить подключение</button><p class="muted">На этом шаге заявки не отправляются. Уже принятые сервером лиды и строки SENT повторно не отправляются.</p></form>';
@@ -309,6 +343,7 @@ function googlePickerScript(): void {
     echo '<script nonce="'.h($GLOBALS['bridge_nonce']).'">(function(){const c='.$config.';const b=document.getElementById("google-picker"),s=document.getElementById("google-picker-status");b.addEventListener("click",function(){s.textContent="Открываем выбор таблицы…";b.disabled=true;let script=document.getElementById("google-api-loader");function open(){gapi.load("picker",{callback:function(){b.disabled=false;s.textContent="";const view=new google.picker.DocsView(google.picker.ViewId.SPREADSHEETS);new google.picker.PickerBuilder().addView(view).setOAuthToken(c.token).setDeveloperKey(c.key).setAppId(c.project).setOrigin(location.origin).setCallback(function(data){if(data.action===google.picker.Action.PICKED){document.getElementById("google-book-id").value=data.docs[0].id;document.getElementById("google-inspect").requestSubmit();}}).build().setVisible(true);},onerror:fail,timeout:15000,ontimeout:fail});}function fail(){b.disabled=false;s.textContent="Не удалось открыть Google. Обновите страницу или подключите Google заново.";}if(window.gapi){open();return;}script=document.createElement("script");script.id="google-api-loader";script.src="https://apis.google.com/js/api.js";script.onload=open;script.onerror=fail;document.head.appendChild(script);});})();</script>';
 }
 function googleManual(): void {
+    echo '<h3>Переподключение Google и HTTP 403</h3><p>«Переподключить мой Google» в связке, подключении или личных настройках открывает повторный вход в личный Google-аккаунт баера. Общие реквизиты Google-приложения при этом не меняются. После переподключения из связки вы вернётесь в неё; создание таблицы и отправка заявок автоматически не повторяются. HTTP 403 — отказ Google, а не обязательно истёкший вход. Следуйте указанной причине: недостаточное разрешение требует повторного согласия баера; выключенный Google Sheets API нужно включить администратору в Google Cloud → APIs & Services → Library. Лимиты, место в Drive и политики Workspace требуют отдельного исправления.</p>';
     echo '<h3>Создание таблицы из связки</h3><p>Откройте сохранённую связку и нажмите «Создать Google-таблицу». Таблица появится в подключённом Google-аккаунте владельца и получит название связки. Шапка и служебные колонки создаются автоматически, ID и телефон в новой пустой таблице подготовлены как текст. Form ID не требуется. Привязка к связке сохранится, отправка останется на паузе. Откройте таблицу по ссылке, подключите её лист «Лиды» в TikTok Lead export и Signal postback, затем включите отправку в Lead Bridge. Повторное нажатие не создаёт новую копию. При неподтверждённом создании сначала проверьте Google Drive и подключите найденную таблицу как существующую.</p><h3>Автоматическое подключение таблицы</h3><p>В «Подключение» нажмите «Подключить Google», затем «Выбрать таблицу». Выберите лист и свою связку. По умолчанию обрабатываются только новые заявки; старые строки можно включить явно. Подготовка не отправляет лиды. Отключите старый триггер Apps Script и включите отправку в Lead Bridge. Код, JSON и минутный триггер больше не нужны. Для каждого нового или скопированного листа требуется отдельное подключение; переименование сохраняет привязку. Для другой связки создавайте новый лист.</p><p>Form ID необязателен: повреждённое значение исключается с предупреждением, заявка продолжает обработку. Lead ID и остальные ID должны быть точными строками. Утерянные цифры не восстанавливаются. Исходные значения и форматы мост не меняет. Ошибочные строки получают REVIEW; после исправления задайте RETRY. SENT означает приём ПП; CRM-статус приходит отдельно. При большой таблице проверка всех строк занимает несколько проходов.</p><p>В TikTok отдельно выберите эту таблицу и лист для Lead export, сопоставьте поля. Для Signal postback сопоставьте исходный TikTok Lead ID и TikTok Lead Status. Подключение Google к мосту не настраивает TikTok.</p>';
     if(isAdmin())echo '<h3>Настройка Google для администратора</h3><p>В Google Cloud создайте проект, включите Google Sheets API, Google Drive API и Google Picker API. Настройте OAuth consent screen, разрешение https://www.googleapis.com/auth/drive.file и OAuth client типа Web application. Redirect URI: <code>'.h(googleCallbackUrl()).'</code>. Добавьте origin панели в Authorized JavaScript origins. Создайте API key для Picker, разрешите в API restrictions Google Picker API и Google Drive API, а в Websites — https://bridge.naturalsolution.help/* и https://docs.google.com/*. Все реквизиты должны относиться к одному проекту. В «Настройки → Google Sheets» сохраните Client ID, Client secret, API key и числовой номер проекта. Секрет шифруется на сервере и не показывается в браузере. Для постоянной работы внешнего приложения переведите consent screen в Production; в Testing refresh token для этого разрешения обычно истекает через 7 дней. При необходимости пройдите проверку Google. Google-аккаунт должен иметь право редактировать выбранную таблицу.</p>';
 }

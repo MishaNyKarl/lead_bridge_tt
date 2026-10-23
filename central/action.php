@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.16.0';
+const BRIDGE_VERSION = '1.16.1';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -568,7 +568,7 @@ function panel(): void {
             if(!$auth)throw new InvalidArgumentException('Войдите в панель');mutate();$notice='Сохранено';
         }catch(OpsLoginRequired $e){unset($_SESSION['uid'],$_SESSION['ops']);redirect('?opsvault=login&reauth=1');}catch(OpsDenied $e){http_response_code(403);$error=$e->getMessage();$auth=false;}catch(OpsUnavailable $e){http_response_code(503);$error='OpsVault временно недоступен. Действие не выполнено.';$auth=false;}catch(InvalidArgumentException $e){$error=$e->getMessage();}catch(Throwable $e){$error='Не удалось выполнить действие';error_log('Bridge panel: '.get_class($e));}
     }
-    if($auth&&($_GET['google']??'')==='finish'){try{googleFinish();redirect('?page=setup');}catch(InvalidArgumentException $e){$error=$e->getMessage();}}
+    if($auth&&($_GET['google']??'')==='finish'){try{redirect(googleFinish());}catch(InvalidArgumentException $e){$error=$e->getMessage();}}
     if($auth)refreshPanelSession();
     $page=$_GET['page']??'overview';$titles=['overview'=>'Обзор','route'=>'Связки','tracker'=>'Трекеры','partner'=>'Партнёрки','leads'=>'Журнал лидов','setup'=>'Подключение','settings'=>'Настройки'];
     if($auth&&!empty(currentUser()['sso_migration']))$page='settings';

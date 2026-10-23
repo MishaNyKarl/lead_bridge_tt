@@ -97,4 +97,19 @@ ob_start();googlePersonalSettings();$personal=ob_get_clean();test(str_contains($
 sql('INSERT INTO sheet_sources(id,owner,spreadsheet,sheet,route,data,active) VALUES(?,?,?,?,?,?,1)',['other-source','b','other-book','7','other-route',seal(['title'=>'other'])]);
 googleMutation('google_disconnect');test(!sql('SELECT 1 FROM google_accounts WHERE owner="a"')->fetchColumn()&&googleToken('b')==='buyer-b-token','disconnect removes only current buyer grant');test(source($id)['active']==0&&source('other-source')['active']==1,'disconnect pauses only current buyer sources');
 setting('google_config','');ob_start();googlePersonalSettings();$personal=ob_get_clean();test(str_contains($personal,'Подключить мой Google-аккаунт')&&str_contains($personal,' disabled')&&str_contains($personal,'каждый войдёт в свой Google'),'unconfigured app keeps personal connection visible with explanation');
+// Provider reason codes are translated without exposing free-text messages or metadata.
+foreach(['SERVICE_DISABLED'=>'не включён','ACCESS_TOKEN_SCOPE_INSUFFICIENT'=>'не выдано','RATE_LIMIT_EXCEEDED'=>'лимит API','storageQuotaExceeded'=>'свободное место','domainPolicy'=>'политикой'] as $reason=>$expected){
+ $data=['error'=>['message'=>'PRIVATE_MARKER','details'=>[['reason'=>$reason,'metadata'=>['service'=>'sheets.googleapis.com','consumer'=>'PRIVATE_MARKER']]]]];
+ $message=googleErrorMessage(403,$data,'https://sheets.googleapis.com/v4/spreadsheets');test(str_contains($message,$expected)&&!str_contains($message,'PRIVATE_MARKER'),'safe explanation for '.$reason);
+}
+test(str_contains(googleErrorMessage(403,[],'https://sheets.googleapis.com/v4/spreadsheets'),'личный Google-аккаунт баера'),'generic 403 explains whose account is used');
+test(str_contains(googleErrorMessage(400,['error'=>'invalid_client'],'https://oauth2.googleapis.com/token'),'общего приложения'),'OAuth client error belongs to shared app configuration');
+test(str_contains(googleErrorMessage(400,['error'=>'invalid_grant'],'https://oauth2.googleapis.com/token'),'Переподключить мой Google'),'expired grant requests buyer reconnect');
+setting('google_config',seal(['client_id'=>'stub','client_secret'=>'CLIENT_SECRET','project'=>'123','picker_key'=>'stub']));
+ob_start();googleRouteControls('uncertain-route');$pendingUi=ob_get_clean();test(str_contains($pendingUi,'Переподключить мой Google')&&str_contains($pendingUi,'name="route" value="uncertain-route"'),'reconnect visible on pending route with exact return context');
+$phase=sql('SELECT phase FROM sheet_creations WHERE owner="a" AND route="uncertain-route"')->fetchColumn();
+$_SESSION['google_attempt']=['state'=>'reconnect','owner'=>'a','expires'=>time()+60,'verifier'=>'stub-verifier','config'=>setting('google_config'),'route'=>'new-route'];$_GET=['state'=>'reconnect','code'=>'stub'];
+$return=googleFinish(fn()=>['code'=>200,'error'=>'','body'=>json_encode(['access_token'=>'reconnected','refresh_token'=>'refresh-stub','expires_in'=>3600,'scope'=>GOOGLE_FILE_SCOPE])]);
+test($return==='?page=route&edit=new-route','OAuth reconnect returns to originating route');test(sql('SELECT phase FROM sheet_creations WHERE owner="a" AND route="uncertain-route"')->fetchColumn()===$phase,'reconnect never resets uncertain creation');test(googleToken('b')==='buyer-b-token','reconnect does not replace another buyer grant');
+$_SESSION['uid']='b';fails(fn()=>googleReturnPath('new-route'),'reconnect cannot target another buyer route');fails(fn()=>googleReturnPath('https://evil.example'),'OAuth return cannot be an arbitrary URL');$_SESSION['uid']='a';
 test(sql('PRAGMA integrity_check')->fetchColumn()==='ok','Google connector database integrity');

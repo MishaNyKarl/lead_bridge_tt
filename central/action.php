@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.15.0';
+const BRIDGE_VERSION = '1.15.1';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -664,7 +664,7 @@ function panel(): void {
     }elseif($page==='setup'){googleSetupPage();echo '<div class="card"><h2>Как читать статусы</h2><p>QUEUED — заявка сохранена на сервере; SENT — ПП подтвердила приём; REVIEW — нужна проверка. После исправления исходной строки задайте RETRY. Уже принятые заявки повторно не отправляются. CRM-статус приходит отдельно от ПП.</p><p>Обязательные колонки: Lead ID (или TikTok Lead ID) и Phone. Form ID необязателен. ID должны сохраняться точным текстом. Мост не меняет исходные значения и форматы. Полная инструкция — по кнопке «?».</p></div>';}
     elseif($page==='users'){accountsPage();}
     elseif($page==='settings'){
-        opsSettings();googleSettings();
+        opsSettings();googlePersonalSettings();googleSettings();
         if(isAdmin())scriptNoticeControls();
         echo '<div class="card"><h2>Часовой пояс</h2><p class="muted">Время в журнале лидов и последних действиях отображается в выбранном часовом поясе. Настройка действует только для вашего аккаунта.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="timezone">';options('timezone','Часовой пояс',['Europe/Moscow'=>'Europe/Moscow (Москва, UTC+3)','UTC'=>'UTC (UTC+0)'],userTimezone());echo '<button>Сохранить часовой пояс</button></form></div>';
 

@@ -211,17 +211,25 @@ function googleMutation(string $op): bool {
         sql('UPDATE sheet_sources SET active=?,next_at=0 WHERE id=?',[$s['active']?0:1,$s['id']]);audit($s['active']?'sheet_paused':'sheet_enabled',$s['id']);
     }else throw new InvalidArgumentException('Неизвестное действие Google');return true;
 }
+function googlePersonalSettings(): void {
+    googleSchema();$u=requireUser();$connected=(bool)sql('SELECT 1 FROM google_accounts WHERE owner=?',[$u['id']])->fetchColumn();$ready=googleReady();
+    echo '<div class="card"><h2>Мой Google-аккаунт</h2><p>Каждый баер подключает свой Google-аккаунт. Его подключение и выбранные таблицы привязаны к его аккаунту Lead Bridge.</p><p role="status">'.($connected?'Ваш Google-аккаунт подключён.':'Вы ещё не подключили свой Google-аккаунт.').'</p>';
+    echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button'.($ready?'':' disabled').'>'.($connected?'Выбрать другой Google-аккаунт':'Подключить мой Google-аккаунт').'</button></form>';
+    if(!$ready)echo '<p class="muted">Подключение пока недоступно: администратору нужно настроить Google-приложение Lead Bridge один раз для всех баеров. После этого каждый войдёт в свой Google. Пароль от Google вводится только на странице Google.</p>';
+    if($connected)echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_disconnect"><button class="secondary">Отключить мой Google и остановить мои таблицы</button></form>';
+    echo '<p><a href="?page=setup">Перейти к подключению моих таблиц →</a></p></div>';
+}
 function googleSettings(): void {
     if(!isAdmin())return;$c=googleConfig();
-    echo '<div class="card"><h2>Google Sheets</h2><p>Однократная настройка для автоматического подключения таблиц баерами. <a href="?page=setup">Перейти к таблицам</a>. Инструкция — по кнопке «?».</p><form method="post">'.csrf().'<input type="hidden" name="op" value="google_config">';
+    echo '<div class="card"><h2>Google-приложение Lead Bridge</h2><p>Общая техническая настройка для всех баеров. Каждый баер подключает свой Google-аккаунт в блоке «Мой Google-аккаунт». Инструкция — по кнопке «?».</p><form method="post">'.csrf().'<input type="hidden" name="op" value="google_config">';
     input('client_id','Google OAuth Client ID',$c['client_id']??'');input('client_secret','Client secret — пустое поле сохраняет текущий','','password',empty($c['client_secret']));input('picker_key','Google Picker API key',$c['picker_key']??'');input('project','Номер Google Cloud project',$c['project']??'');
     echo '<p class="muted">Redirect URI: <code>'.h(googleCallbackUrl()).'</code></p><button>Сохранить Google</button></form></div>';
 }
 function googleSetupPage(): void {
     googleSchema();$u=requireUser();$connected=(bool)sql('SELECT 1 FROM google_accounts WHERE owner=?',[$u['id']])->fetchColumn();
     echo '<div class="card"><h2>Подключить Google-таблицу</h2><p>Выберите таблицу, лист и связку. Lead Bridge подготовит служебные колонки, будет забирать заявки и возвращать статусы. Form ID необязателен.</p>';
-    if(!googleReady())echo '<p role="status">Администратору нужно один раз настроить Google в разделе «Настройки». После этого таблицы подключаются здесь без Apps Script.</p>';
-    elseif(!$connected)echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button>Подключить Google</button></form><p class="muted">Доступ предоставляется только к файлам, выбранным для Lead Bridge.</p>';
+    if(!googleReady())echo '<button type="button" disabled>Подключить мой Google-аккаунт</button><p role="status">Администратору нужно один раз настроить Google-приложение Lead Bridge в разделе «Настройки». Затем каждый баер подключит здесь свой Google-аккаунт и свои таблицы без Apps Script.</p>';
+    elseif(!$connected)echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button>Подключить мой Google-аккаунт</button></form><p class="muted">Войдите в свой Google. Доступ предоставляется только к файлам, выбранным для Lead Bridge.</p>';
     else{
         echo '<button type="button" id="google-picker">Выбрать таблицу</button><p id="google-picker-status" role="status" aria-live="polite"></p><form method="post" id="google-inspect" hidden>'.csrf().'<input type="hidden" name="op" value="google_inspect"><input type="hidden" name="spreadsheet" id="google-book-id"></form>';
         $pending=$_SESSION['google_book']??null;

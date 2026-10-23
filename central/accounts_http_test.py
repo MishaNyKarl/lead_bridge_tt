@@ -218,7 +218,9 @@ try:
  assert_ok(conn.execute('pragma integrity_check').fetchone()[0]=='ok','integrity after account operations')
  # New Google integration remains owner-scoped and protected by panel CSRF.
  assert_ok('Form ID необязателен' in c.req('?page=setup')[1],'setup explains optional Form ID')
- assert_ok('Client secret' not in c.req('?page=settings')[1],'buyer cannot see Google admin settings')
+ settings=c.req('?page=settings')[1]
+ assert_ok('Мой Google-аккаунт' in settings and 'Подключить мой Google-аккаунт' in settings,'buyer sees personal Google settings before app setup')
+ assert_ok('Client secret' not in settings,'buyer cannot see Google admin settings')
  c.post(op='google_config',client_id='x',client_secret='x',picker_key='x',project='123')
  assert_ok(conn.execute("SELECT count(*) FROM settings WHERE k='google_config'").fetchone()[0]==0,'buyer cannot configure Google app')
  admin.req(data={'csrf':'wrong','op':'google_config','client_id':'x','client_secret':'x','picker_key':'x','project':'123'})

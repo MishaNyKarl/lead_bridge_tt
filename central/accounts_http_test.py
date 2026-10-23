@@ -216,6 +216,14 @@ try:
  assert_ok(Client().req(data=json.dumps({'route_id':'route_b','op':'check'}).encode(),headers={'Content-Type':'application/json','X-Bridge-Secret':'b'*64})[0]==403,'disabled account API blocked')
  assert_ok('Свои права' in admin.post(op='user_save',id='admin',name='Admin',role='buyer',password='')[1],'cannot remove own admin access')
  assert_ok(conn.execute('pragma integrity_check').fetchone()[0]=='ok','integrity after account operations')
+ # New Google integration remains owner-scoped and protected by panel CSRF.
+ assert_ok('Form ID необязателен' in c.req('?page=setup')[1],'setup explains optional Form ID')
+ assert_ok('Client secret' not in c.req('?page=settings')[1],'buyer cannot see Google admin settings')
+ c.post(op='google_config',client_id='x',client_secret='x',picker_key='x',project='123')
+ assert_ok(conn.execute("SELECT count(*) FROM settings WHERE k='google_config'").fetchone()[0]==0,'buyer cannot configure Google app')
+ admin.req(data={'csrf':'wrong','op':'google_config','client_id':'x','client_secret':'x','picker_key':'x','project':'123'})
+ assert_ok(conn.execute("SELECT count(*) FROM settings WHERE k='google_config'").fetchone()[0]==0,'Google settings require CSRF')
+ assert_ok('Подключение недоступно' in c.post(op='google_toggle',source='foreign-source')[1],'unknown Google source rejected')
  print('ALL ACCOUNT HTTP TESTS PASSED')
 finally:
  server.terminate();server.wait(timeout=10);log.close()

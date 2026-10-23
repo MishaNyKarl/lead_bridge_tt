@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.15.2';
+const BRIDGE_VERSION = '1.16.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -473,7 +473,7 @@ function mutate(): void {
     throw new InvalidArgumentException('Unknown operation');
 }
 function connectionGuide(?array $conf=null): void {
-    if($conf!==null)echo '<p><a class="button" href="?page=setup">Подключить таблицу автоматически</a></p><details><summary>Прежний способ через Apps Script</summary>';
+    if($conf!==null){googleRouteControls($conf['ROUTE_ID']);echo '<details><summary>Прежний способ через Apps Script</summary>';}
     echo '<p><strong>Form ID необязателен.</strong> Можно не сопоставлять его в TikTok и не добавлять отдельную текстовую колонку. Если точное значение приходит, мост сохранит его. Повреждённое или неоднозначное значение исключается с предупреждением и не блокирует отправку лида. Обязательный Lead ID по-прежнему должен сохраняться точно.</p>';
     echo '<p><strong>Apps Script 1.14.1:</strong> повреждённый или неоднозначный Form ID не блокирует отправку: поле исключается из заявки, Lead ID выделяется красным, причина сохраняется в колонке <code>Bridge Warning</code>. Точный Form ID передаётся как прежде. Значения и числовые форматы исходных ячеек не меняются. Красный Lead ID означает предупреждение о Form ID, а результат доставки смотрите в <code>Webhook_Status</code>: SENT — приём ПП, не апрув. Обновите скрипт во всех таблицах и выполните «Подготовить и проверить». Старые REVIEW автоматически не отправляются: после проверки задайте RETRY только нужным строкам. Округлённый Lead ID по-прежнему блокирует отправку.</p>';
     $headers="Lead ID\tName\tPhone\tCampaign ID\tAd Group ID\tAd ID\tAdvertiser ID\tPlacement\tCampaign Name\tAd Group Name\tAd Name\tADID_V2\tADID_V2_NAME";
@@ -578,6 +578,7 @@ function panel(): void {
     if($auth){try{
         if(in_array($page,['tracker','partner','route'])&&!empty($_GET['edit']))uiEntity(clean($_GET['edit'],80),$page);
         if($page==='leads'&&!empty($_GET['id']))uiLead(clean($_GET['id'],64));
+        if($page==='setup'&&!empty($_GET['route'])){uiEntity(clean($_GET['route'],80),'route');if(ownerOf($_GET['route'])!==requireUser()['id'])throw new InvalidArgumentException('Подключение выполняет владелец связки');}
     }catch(InvalidArgumentException $e){http_response_code(404);echo 'Запись не найдена или недоступна';return;}}
 
     if($auth&&$page==='setup'&&($_GET['download']??'')==='script'){header('Content-Type: text/plain; charset=utf-8');header('Content-Disposition: attachment; filename="LeadBridge.gs"');echo base64_decode('__SCRIPT_BASE64__');return;}

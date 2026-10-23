@@ -63,6 +63,34 @@ fails(fn()=>googleToken('a',function(){sql('DELETE FROM google_accounts WHERE ow
 $_SESSION['google_attempt']=['state'=>'valid-state','owner'=>'a','expires'=>time()+60,'verifier'=>'stub-verifier','config'=>setting('google_config')];$_GET=['state'=>'valid-state','code'=>'stub-code'];
 googleFinish(function($url,$body,$headers){parse_str($body,$p);test($p['code_verifier']==='stub-verifier'&&$p['grant_type']==='authorization_code','OAuth code uses original PKCE verifier');return ['code'=>200,'error'=>'','body'=>json_encode(['access_token'=>'oauth-stub','refresh_token'=>'oauth-refresh','expires_in'=>3600,'scope'=>GOOGLE_FILE_SCOPE])];});
 test(googleToken('a')==='oauth-stub','OAuth grant stored for current owner');fails(fn()=>googleFinish(),'OAuth callback replay rejected');
+// Creation is exercised only against an in-memory Google stub.
+foreach(['new-route','uncertain-route','prepare-route','rejected-route','history-route'] as $rid){$r=$route;$r['name']='Название '.$rid;saveEntity($rid,'route',$r);sql('UPDATE entities SET owner="a" WHERE id=?',[$rid]);}
+$createCalls=0;$prepareCalls=0;$mode='ok';$lastBook='';$leadCount=sql('SELECT count(*) FROM leads')->fetchColumn();
+$creator=function($url,$body,$headers)use(&$createCalls,&$prepareCalls,&$mode,&$lastBook){
+ test(in_array('Authorization: Bearer oauth-stub',$headers,true),'creation uses current buyer Google grant');$body=json_decode($body,true);
+ if($url==='https://sheets.googleapis.com/v4/spreadsheets'){
+  $createCalls++;test(str_starts_with($body['properties']['title'],'Название '),'spreadsheet title comes from route');test($body['sheets'][0]['properties']['gridProperties']['frozenRowCount']===1,'new header frozen');
+  if($mode==='timeout')return ['code'=>0,'error'=>'transport','body'=>''];
+  if($mode==='rejected')return ['code'=>403,'error'=>'','body'=>'{"error":{"message":"stub denial"}}'];
+  $lastBook='created_spreadsheet_'.$createCalls;$d=['spreadsheetId'=>$lastBook,'sheets'=>[['properties'=>['sheetId'=>0]]]];
+ }elseif(str_contains($url,':getByDataFilter'))$d=['sheets'=>[['properties'=>['sheetId'=>0],'data'=>[['rowData'=>($mode==='history'?[[],[],row(['9000000000000000001'])]:[])]]]]];
+ elseif(str_contains($url,':batchUpdate')){
+  $prepareCalls++;$req=$body['requests'];$cells=$req[0]['updateCells']['rows'][0]['values'];test(array_column(array_column($cells,'userEnteredValue'),'stringValue')===array_merge(GOOGLE_INPUT_COLUMNS,GOOGLE_COLUMNS),'new source and service headers prepared exactly');test(count($req)===8,'only new ID and phone columns formatted as text');
+  if($mode==='prepare-timeout')return ['code'=>0,'error'=>'transport','body'=>''];
+  $d=['spreadsheetId'=>$lastBook,'replies'=>array_fill(0,count($req),new stdClass())];
+ }else throw new RuntimeException('Unexpected creation request');
+ return ['code'=>200,'error'=>'','body'=>json_encode($d)];
+};
+$created=googleCreateForRoute('new-route',$creator);test(source($created)['route']==='new-route'&&source($created)['owner']==='a'&&source($created)['active']==0,'new table bound to exact route and owner, paused');
+test(googleCreateForRoute('new-route',$creator)===$created&&$createCalls===1&&$prepareCalls===1,'double click never creates or prepares a second table');test(sql('SELECT count(*) FROM leads')->fetchColumn()===$leadCount,'creation never queues leads or clicks');
+$_SESSION['uid']='b';fails(fn()=>googleCreateForRoute('new-route',$creator),'buyer cannot create for foreign route');$_SESSION['uid']='a';test($createCalls===1,'foreign creation never calls Google');
+$mode='timeout';fails(fn()=>googleCreateForRoute('uncertain-route',$creator),'create timeout preserved');$before=$createCalls;fails(fn()=>googleCreateForRoute('uncertain-route',$creator),'uncertain create requires Drive inspection');test($createCalls===$before,'uncertain create never repeated');
+$mode='prepare-timeout';fails(fn()=>googleCreateForRoute('prepare-route',$creator),'preparation timeout keeps known file');$before=$createCalls;$mode='ok';$resumed=googleCreateForRoute('prepare-route',$creator);test($createCalls===$before&&source($resumed)['spreadsheet']===$lastBook,'retry prepares the same known file');
+$mode='rejected';fails(fn()=>googleCreateForRoute('rejected-route',$creator),'explicit Google rejection reported');$before=$createCalls;$mode='ok';googleCreateForRoute('rejected-route',$creator);test($createCalls===$before+1,'explicit rejection allows a manual new request');
+sql('INSERT INTO sheet_creations VALUES(?,?,?,?)',['a','history-route','created',seal(['title'=>'history','book'=>$lastBook])]);$mode='history';$before=$prepareCalls;fails(fn()=>googleCreateForRoute('history-route',$creator),'manual history below an empty row prevents reformatting');test($prepareCalls===$before,'history recovery never overwrites or reformats input');$mode='ok';
+ob_start();googleRouteControls('new-route');$controls=ob_get_clean();test(str_contains($controls,'?page=setup&amp;route=new-route')&&str_contains($controls,'Открыть созданную таблицу'),'route retains context and links created file');
+$_SESSION['google_book']=['id'=>'created_spreadsheet_1','book'=>['properties'=>['title'=>'test'],'sheets'=>[['properties'=>['sheetId'=>0,'title'=>'Лиды']]]]];$_GET=['route'=>'new-route'];$GLOBALS['bridge_nonce']='test-nonce';
+ob_start();googleSetupPage();$setup=ob_get_clean();test(str_contains($setup,'value="new-route" selected'),'existing table wizard preselects route from card');unset($_SESSION['google_book']);$_GET=[];
 googleSaveAccount('b',['access_token'=>'buyer-b-token','refresh_token'=>'buyer-b-refresh','expires'=>time()+3600]);
 test(googleToken('a')==='oauth-stub'&&googleToken('b')==='buyer-b-token','buyers use separate Google grants');
 ob_start();googlePersonalSettings();$personal=ob_get_clean();test(str_contains($personal,'Мой Google-аккаунт')&&str_contains($personal,'Ваш Google-аккаунт подключён.'),'buyer sees own connected Google settings');test(!str_contains($personal,'oauth-stub')&&!str_contains($personal,'buyer-b-token')&&!str_contains($personal,'CLIENT_SECRET'),'personal settings expose no tokens or app secret');

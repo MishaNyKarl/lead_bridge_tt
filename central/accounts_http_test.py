@@ -226,6 +226,11 @@ try:
  admin.req(data={'csrf':'wrong','op':'google_config','client_id':'x','client_secret':'x','picker_key':'x','project':'123'})
  assert_ok(conn.execute("SELECT count(*) FROM settings WHERE k='google_config'").fetchone()[0]==0,'Google settings require CSRF')
  assert_ok('Подключение недоступно' in c.post(op='google_toggle',source='foreign-source')[1],'unknown Google source rejected')
+ c.req(data={'csrf':'wrong','op':'google_create','route':'route_b'})
+ assert_ok(conn.execute('SELECT count(*) FROM sheet_creations').fetchone()[0]==0,'table creation requires CSRF before external calls')
+ assert_ok('Запись не найдена или недоступна' in c.post(op='google_create',route='route_b')[1],'buyer cannot create table for foreign route')
+ assert_ok(conn.execute('SELECT count(*) FROM sheet_creations').fetchone()[0]==0,'foreign route creates no pending operation')
+ assert_ok(c.req('?page=setup&route=route_b')[0]==404,'foreign route context rejected on setup')
  print('ALL ACCOUNT HTTP TESTS PASSED')
 finally:
  server.terminate();server.wait(timeout=10);log.close()

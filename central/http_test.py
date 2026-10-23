@@ -39,6 +39,12 @@ try:
     assert req(body)[0]==200
     code,text,headers=req(path='?page=route');assert 'Вход в панель' in text and 'campaign_key' not in text
     assert 'no-store' in headers['Cache-Control'];assert "frame-ancestors 'none'" in headers['Content-Security-Policy']
+    assert headers['Referrer-Policy']=='no-referrer'
+    _,_,picker_headers=req(path='?page=setup')
+    assert picker_headers['Referrer-Policy']=='strict-origin'
+    _,_,callback_headers=req(path='?google=callback&code=synthetic-code&state=synthetic-state')
+    assert callback_headers['Referrer-Policy']=='no-referrer'
+    print('PASS HTTP: Picker sends origin for website-restricted keys; ordinary pages and OAuth callback suppress referrer')
     assert 'secure' in headers['Set-Cookie'].lower() and 'httponly' in headers['Set-Cookie'].lower()
     bad=urllib.request.Request(base,data=b'op=save&kind=tracker&name=oops',headers={'Content-Type':'application/x-www-form-urlencoded'})
     assert 'Сессия формы истекла' in urllib.request.urlopen(bad).read().decode()

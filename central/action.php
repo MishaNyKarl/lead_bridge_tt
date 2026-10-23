@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.15.1';
+const BRIDGE_VERSION = '1.15.2';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -724,7 +724,11 @@ function main(): void {
     }
     $GLOBALS['bridge_nonce']=base64_encode(random_bytes(18));
     header('Cache-Control: no-store, private');header('X-Content-Type-Options: nosniff');header('Referrer-Policy: no-referrer');header("Content-Security-Policy: default-src 'none'; script-src 'nonce-{$GLOBALS['bridge_nonce']}'; style-src 'unsafe-inline'; img-src data:; form-action 'self' https://portalwiki.world; frame-ancestors 'none'; base-uri 'none'");header('X-Frame-Options: DENY');
-    if(($_GET['page']??'')==='setup')header(googlePickerCsp());
+    if(($_GET['page']??'')==='setup'){
+        // Website-restricted Picker keys require a Referer. Send the origin only:
+        // never expose query parameters, OAuth codes or a page path to Google.
+        header('Referrer-Policy: strict-origin');header(googlePickerCsp());
+    }
     if(($_GET['google']??'')==='callback'&&$_SERVER['REQUEST_METHOD']==='GET')googleLanding();
     if(isset($_GET['postback']))postback();
     if(isset($_GET['health']))jsonReply(['status'=>'online','version'=>BRIDGE_VERSION]);

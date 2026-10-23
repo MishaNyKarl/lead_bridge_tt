@@ -226,6 +226,10 @@ try:
  admin.req(data={'csrf':'wrong','op':'google_config','client_id':'x','client_secret':'x','picker_key':'x','project':'123'})
  assert_ok(conn.execute("SELECT count(*) FROM settings WHERE k='google_config'").fetchone()[0]==0,'Google settings require CSRF')
  assert_ok('Подключение недоступно' in c.post(op='google_toggle',source='foreign-source')[1],'unknown Google source rejected')
+ assert_ok('Подключение недоступно' in c.post(op='google_set_active',source='foreign-source',enabled='1')[1],'explicit start rejects inaccessible source')
+ before=conn.execute('SELECT count(*) FROM audit').fetchone()[0]
+ c.req(data={'csrf':'wrong','op':'google_set_active','source':'foreign-source','enabled':'1'})
+ assert_ok(conn.execute('SELECT count(*) FROM audit').fetchone()[0]==before,'start with invalid CSRF performs no mutation')
  c.req(data={'csrf':'wrong','op':'google_create','route':'route_b'})
  assert_ok(conn.execute('SELECT count(*) FROM sheet_creations').fetchone()[0]==0,'table creation requires CSRF before external calls')
  assert_ok('Запись не найдена или недоступна' in c.post(op='google_create',route='route_b')[1],'buyer cannot create table for foreign route')

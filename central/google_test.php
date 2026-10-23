@@ -32,7 +32,10 @@ $id=googleConnectSource('a',$book,$sheet,'route',false,$http);test(!source($id)[
 test(count($writes)===count(GOOGLE_COLUMNS),'only service headers written');test(!str_contains(file_get_contents($tmp.'/bridge.sqlite'),'TEST_REFRESH'),'refresh token encrypted');
 fails(fn()=>googleConnectSource('a',$book,$sheet,'route',true,$http),'duplicate source cannot change binding');
 fails(fn()=>googleConnectSource('b',$book,'8','route',true,$http),'foreign route rejected before Google call');
-sql('UPDATE sheet_sources SET active=1 WHERE id=?',[$id]);googleSyncSource(source($id),$http);test((int)sql('SELECT count(*) FROM leads')->fetchColumn()===0,'existing IDs skipped by default');test(unseal(source($id)['data'])['cursor']===1,'empty reserved grid does not delay new lead polling');
+googleTick(fn()=>throw new RuntimeException('Paused source must not call Google'));
+$_POST=['source'=>$id,'enabled'=>'1','old_trigger_disabled'=>'1'];googleMutation('google_set_active');googleTick($http);
+test(source($id)['checked']!==''&&source($id)['next_at']>time(),'enabled source picked up by worker polling without Apps Script trigger');
+test((int)sql('SELECT count(*) FROM leads')->fetchColumn()===0,'existing IDs skipped by default');test(unseal(source($id)['data'])['cursor']===1,'empty reserved grid does not delay new lead polling');
 $grid[]=row(['1000000000000000002','New','+254700000002',9.123e18]);googleSyncSource(source($id),$http);
 $lead=sql('SELECT * FROM leads WHERE external_id=?',['1000000000000000002'])->fetch();test($lead&&$lead['state']==='queued','new lead durably queued');$payload=unseal($lead['payload']);test($payload['form_id']===''&&$payload['lead_id']==='1000000000000000002','damaged optional form excluded, lead ID exact');
 $h=googleHeaders($grid[0]);$receiptCol=array_search('Bridge Receipt',$h,true);test(googleCell($grid[2]['values'][$receiptCol])===$lead['id'],'receipt written');
@@ -89,6 +92,21 @@ $mode='prepare-timeout';fails(fn()=>googleCreateForRoute('prepare-route',$creato
 $mode='rejected';fails(fn()=>googleCreateForRoute('rejected-route',$creator),'explicit Google rejection reported');$before=$createCalls;$mode='ok';googleCreateForRoute('rejected-route',$creator);test($createCalls===$before+1,'explicit rejection allows a manual new request');
 sql('INSERT INTO sheet_creations VALUES(?,?,?,?)',['a','history-route','created',seal(['title'=>'history','book'=>$lastBook])]);$mode='history';$before=$prepareCalls;fails(fn()=>googleCreateForRoute('history-route',$creator),'manual history below an empty row prevents reformatting');test($prepareCalls===$before,'history recovery never overwrites or reformats input');$mode='ok';
 ob_start();googleRouteControls('new-route');$controls=ob_get_clean();test(str_contains($controls,'?page=setup&amp;route=new-route')&&str_contains($controls,'Открыть созданную таблицу'),'route retains context and links created file');
+test(str_contains($controls,'Добавил таблицу в ТТ — запустить')&&!str_contains($controls,'name="old_trigger_disabled"'),'created route offers direct start without legacy trigger checkbox');
+$_POST=['source'=>$created,'enabled'=>'1'];googleMutation('google_set_active');test(source($created)['active']==1,'TikTok ready button enables exact created source');
+sql('UPDATE sheet_sources SET next_at=123 WHERE id=?',[$created]);googleMutation('google_set_active');test(source($created)['active']==1&&source($created)['next_at']==123,'repeated start preserves active state and polling schedule');
+test(sql('SELECT count(*) FROM leads')->fetchColumn()===$leadCount,'start never imports or sends leads inside HTTP request');
+ob_start();googleRouteControls('new-route');$running=ob_get_clean();test(str_contains($running,'Сервер забирает строки автоматически')&&str_contains($running,'Приостановить'),'route shows running state and pause control');
+$_POST=['source'=>$created,'enabled'=>'0'];googleMutation('google_set_active');googleMutation('google_set_active');test(source($created)['active']==0,'repeated pause stays paused');
+$_SESSION['uid']='b';$_POST=['source'=>$created,'enabled'=>'1'];fails(fn()=>googleMutation('google_set_active'),'new start action rejects foreign source');$_SESSION['uid']='a';
+$_POST=['source'=>$created,'enabled'=>'2'];fails(fn()=>googleMutation('google_set_active'),'invalid desired state rejected');
+$_POST=['source'=>$id,'enabled'=>'1'];fails(fn()=>googleMutation('google_set_active'),'existing table still requires legacy trigger confirmation');
+$_POST=['source'=>$id,'enabled'=>'1','old_trigger_disabled'=>'1'];googleMutation('google_set_active');test(source($id)['active']==1,'existing table starts with trigger confirmation');
+// A ready operation for a different file cannot waive legacy migration acknowledgement.
+sql('UPDATE sheet_sources SET spreadsheet="different_file_123" WHERE id=?',[$created]);$_POST=['source'=>$created,'enabled'=>'1'];fails(fn()=>googleMutation('google_set_active'),'created provenance must match exact file');sql('UPDATE sheet_sources SET spreadsheet="created_spreadsheet_1" WHERE id=?',[$created]);
+$disabled=$route;$disabled['active']=false;saveEntity('new-route','route',$disabled);fails(fn()=>googleMutation('google_set_active'),'inactive route cannot start');saveEntity('new-route','route',$route);
+sql('UPDATE users SET active=0 WHERE id="a"');fails(fn()=>googleMutation('google_set_active'),'disabled owner cannot start');sql('UPDATE users SET active=1 WHERE id="a"');
+$grant=sql('SELECT data FROM google_accounts WHERE owner="a"')->fetchColumn();sql('DELETE FROM google_accounts WHERE owner="a"');fails(fn()=>googleMutation('google_set_active'),'disconnected Google cannot start');sql('INSERT INTO google_accounts VALUES(?,?)',['a',$grant]);
 $_SESSION['google_book']=['id'=>'created_spreadsheet_1','book'=>['properties'=>['title'=>'test'],'sheets'=>[['properties'=>['sheetId'=>0,'title'=>'Лиды']]]]];$_GET=['route'=>'new-route'];$GLOBALS['bridge_nonce']='test-nonce';
 ob_start();googleSetupPage();$setup=ob_get_clean();test(str_contains($setup,'value="new-route" selected'),'existing table wizard preselects route from card');unset($_SESSION['google_book']);$_GET=[];
 googleSaveAccount('b',['access_token'=>'buyer-b-token','refresh_token'=>'buyer-b-refresh','expires'=>time()+3600]);

@@ -180,6 +180,20 @@ function googleCreateForRoute(string $routeId,?callable $http=null): string {
     if(!$saved)throw new InvalidArgumentException('Таблица уже подключена иначе. Проверьте список подключений.');
     sql('UPDATE sheet_creations SET phase="ready" WHERE owner=? AND route=?',[$owner,$routeId]);audit('sheet_created',$saved);return $saved;
 }
+function googleCreatedSource(array $s): bool {
+    $op=sql('SELECT phase,data FROM sheet_creations WHERE owner=? AND route=?',[$s['owner'],$s['route']])->fetch();
+    return $op&&$op['phase']==='ready'&&$s['sheet']==='0'&&(unseal($op['data'])['book']??'')===$s['spreadsheet'];
+}
+function googleSourceControls(array $s): void {
+    $created=googleCreatedSource($s);
+    echo '<p role="status">'.($s['active']?'Отправка включена. Сервер забирает строки автоматически.':'Отправка на паузе.').'</p><p class="muted">Проверено: '.h($s['checked']?displayDate($s['checked']):'ещё не проверялось').'</p>';
+    if($s['error'])echo '<p role="alert">'.h($s['error']).'</p>';
+    echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_set_active"><input type="hidden" name="source" value="'.h($s['id']).'"><input type="hidden" name="enabled" value="'.($s['active']?'0':'1').'">';
+    if(!$s['active']&&!$created)echo '<label><input type="checkbox" name="old_trigger_disabled" value="1" required> Старый триггер отправки Apps Script отключён, либо его не было</label>';
+    echo '<button'.($s['active']?' class="secondary"':'').'>'.($s['active']?'Приостановить':($created?'Добавил таблицу в ТТ — запустить':'Включить отправку')).'</button></form>';
+    if(!$s['active'])echo '<p class="muted">После запуска будут обрабатываться новые строки'.($created?', включая уже поступивший тестовый лид TikTok':' согласно выбранному режиму импорта').'. Они могут создать клик Binom и заявку в ПП. Дополнительный триггер Google не нужен.</p>';
+    else echo '<p class="muted">Первый проход обычно начинается в течение минуты; очередь таблиц может увеличить ожидание. Обновите страницу, чтобы увидеть время проверки и ошибки. Статусы появятся в служебных колонках таблицы.</p>';
+}
 function googleRouteControls(string $routeId): void {
     googleSchema();$u=requireUser();uiEntity($routeId,'route');
     echo '<h2>Google-таблица для связки</h2><p><a class="button secondary" href="?page=setup&amp;route='.h($routeId).'">Подключить таблицу автоматически</a></p>';
@@ -187,7 +201,11 @@ function googleRouteControls(string $routeId): void {
     googleReconnectForm($routeId);echo '<p class="muted">Переподключается ваш личный Google-аккаунт баера. После входа Google вернёт вас в эту связку. Создание таблицы автоматически не повторяется.</p>';
     $op=sql('SELECT * FROM sheet_creations WHERE owner=? AND route=?',[$u['id'],$routeId])->fetch();
     if($op){$d=unseal($op['data']);if(!empty($d['book']))echo '<p><a href="https://docs.google.com/spreadsheets/d/'.h($d['book']).'/edit" target="_blank" rel="noopener noreferrer">Открыть созданную таблицу ↗</a></p>';}
-    if($op&&$op['phase']==='ready'){echo '<p>Таблица создана и привязана к этой связке. Управление отправкой — в разделе «Подключение».</p>';return;}
+    if($op&&$op['phase']==='ready'){
+        $source=sql('SELECT * FROM sheet_sources WHERE owner=? AND route=? AND spreadsheet=? AND sheet="0"',[$u['id'],$routeId,$d['book']??''])->fetch();
+        echo '<p>Таблица создана и привязана к этой связке. Выберите её и лист «Лиды» в TikTok, сопоставьте Lead ID, Phone и остальные поля, затем запустите обработку ниже.</p>';
+        if($source)googleSourceControls($source);else echo '<p role="alert">Подключение не найдено. Проверьте раздел «Подключение».</p>';return;
+    }
     if($op&&$op['phase']==='pending'){echo '<p role="alert">Результат создания не подтверждён. Проверьте Google Drive и подключите появившуюся таблицу как существующую. Автоматического повтора создания нет.</p>';return;}
     $connected=googleReady()&&(bool)sql('SELECT 1 FROM google_accounts WHERE owner=?',[$u['id']])->fetchColumn();
     echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_create"><input type="hidden" name="route" value="'.h($routeId).'"><button'.($connected?'':' disabled').'>'.($op&&$op['phase']==='created'?'Завершить подготовку таблицы':'Создать Google-таблицу').'</button></form><p class="muted">Название берётся из связки. Мост создаст лист «Лиды», шапку и служебные колонки и сохранит привязку. Отправка останется на паузе; затем выберите эту таблицу в TikTok.</p>';
@@ -293,11 +311,19 @@ function googleMutation(string $op): bool {
     }elseif($op==='google_connect'){
         $book=required($_POST,'spreadsheet',150);$route=required($_POST,'route',80);uiEntity($route,'route');
         $id=googleConnectSource($u['id'],$book,required($_POST,'sheet',12),$route,($_POST['history']??'')==='all');unset($_SESSION['google_book']);audit('sheet_prepared',$id);
-    }elseif($op==='google_toggle'){
+    }elseif($op==='google_toggle'||$op==='google_set_active'){
         $s=googleSource(required($_POST,'source',80));
-        if(!$s['active']&&($_POST['old_trigger_disabled']??'')!=='1')throw new InvalidArgumentException('Подтвердите отключение старого триггера Apps Script');
+        $enabled=$op==='google_toggle'?!$s['active']:required($_POST,'enabled',1);
+        if(!in_array($enabled,[true,false,'0','1'],true))throw new InvalidArgumentException('Неизвестное состояние подключения');$enabled=(int)$enabled;
+        if($enabled&&!googleCreatedSource($s)&&($_POST['old_trigger_disabled']??'')!=='1')throw new InvalidArgumentException('Подтвердите отключение старого триггера Apps Script');
         if(ownerOf($s['route'])!==$s['owner'])throw new InvalidArgumentException('Владелец связки изменился');
-        sql('UPDATE sheet_sources SET active=?,next_at=0 WHERE id=?',[$s['active']?0:1,$s['id']]);audit($s['active']?'sheet_paused':'sheet_enabled',$s['id']);
+        if($enabled){
+            bridgeBackground($s['owner']);
+            if(!sql('SELECT 1 FROM google_accounts WHERE owner=?',[$s['owner']])->fetchColumn())throw new InvalidArgumentException('Сначала подключите Google-аккаунт владельца таблицы');
+            if(empty(entity($s['route'],'route')['active']))throw new InvalidArgumentException('Сначала включите связку и сохраните её, затем запустите таблицу');
+        }
+        // Explicit desired state makes a repeated POST harmless; no import or external send in this request.
+        if((int)$s['active']!==$enabled){sql('UPDATE sheet_sources SET active=?,next_at=0 WHERE id=?',[$enabled,$s['id']]);audit($enabled?'sheet_enabled':'sheet_paused',$s['id']);}
     }else throw new InvalidArgumentException('Неизвестное действие Google');return true;
 }
 function googlePersonalSettings(): void {
@@ -330,8 +356,8 @@ function googleSetupPage(): void {
     }
     echo '</div>';
     $sources=isAdmin()?sql('SELECT * FROM sheet_sources ORDER BY rowid DESC'):sql('SELECT * FROM sheet_sources WHERE owner=? ORDER BY rowid DESC',[$u['id']]);
-    foreach($sources as $s){$c=unseal($s['data']);$routeName=ownerOf($s['route'])===$s['owner']?entity($s['route'],'route')['name']:'Связка недоступна';echo '<div class="card"><h2>'.h($c['title']).'</h2><p><a href="https://docs.google.com/spreadsheets/d/'.h($s['spreadsheet']).'/edit#gid='.h($s['sheet']).'" target="_blank" rel="noopener noreferrer">Открыть таблицу ↗</a></p><p>Связка: '.h($routeName).' · '.($s['active']?'Отправка включена':'На паузе').'</p><p class="muted">Проверено: '.h($s['checked']?displayDate($s['checked']):'ещё не проверялось').'</p>';if($s['error'])echo '<p role="alert">'.h($s['error']).'</p>';
-        echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_toggle"><input type="hidden" name="source" value="'.h($s['id']).'">';if(!$s['active'])echo '<label><input type="checkbox" name="old_trigger_disabled" value="1" required> Старый триггер отправки Apps Script отключён, либо его не было</label>';echo '<button'.($s['active']?' class="secondary"':'').'>'.($s['active']?'Приостановить':'Включить отправку').'</button></form></div>';
+    foreach($sources as $s){$c=unseal($s['data']);$routeName=ownerOf($s['route'])===$s['owner']?entity($s['route'],'route')['name']:'Связка недоступна';echo '<div class="card"><h2>'.h($c['title']).'</h2><p><a href="https://docs.google.com/spreadsheets/d/'.h($s['spreadsheet']).'/edit#gid='.h($s['sheet']).'" target="_blank" rel="noopener noreferrer">Открыть таблицу ↗</a></p><p>Связка: '.h($routeName).'</p>';
+        googleSourceControls($s);echo '</div>';
     }
     if($connected&&googleReady())googlePickerScript();
     echo '<details class="card"><summary>Подключение через Apps Script (прежний способ)</summary>';connectionGuide();echo '</details>';
@@ -344,6 +370,6 @@ function googlePickerScript(): void {
 }
 function googleManual(): void {
     echo '<h3>Переподключение Google и HTTP 403</h3><p>«Переподключить мой Google» в связке, подключении или личных настройках открывает повторный вход в личный Google-аккаунт баера. Общие реквизиты Google-приложения при этом не меняются. После переподключения из связки вы вернётесь в неё; создание таблицы и отправка заявок автоматически не повторяются. HTTP 403 — отказ Google, а не обязательно истёкший вход. Следуйте указанной причине: недостаточное разрешение требует повторного согласия баера; выключенный Google Sheets API нужно включить администратору в Google Cloud → APIs & Services → Library. Лимиты, место в Drive и политики Workspace требуют отдельного исправления.</p>';
-    echo '<h3>Создание таблицы из связки</h3><p>Откройте сохранённую связку и нажмите «Создать Google-таблицу». Таблица появится в подключённом Google-аккаунте владельца и получит название связки. Шапка и служебные колонки создаются автоматически, ID и телефон в новой пустой таблице подготовлены как текст. Form ID не требуется. Привязка к связке сохранится, отправка останется на паузе. Откройте таблицу по ссылке, подключите её лист «Лиды» в TikTok Lead export и Signal postback, затем включите отправку в Lead Bridge. Повторное нажатие не создаёт новую копию. При неподтверждённом создании сначала проверьте Google Drive и подключите найденную таблицу как существующую.</p><h3>Автоматическое подключение таблицы</h3><p>В «Подключение» нажмите «Подключить Google», затем «Выбрать таблицу». Выберите лист и свою связку. По умолчанию обрабатываются только новые заявки; старые строки можно включить явно. Подготовка не отправляет лиды. Отключите старый триггер Apps Script и включите отправку в Lead Bridge. Код, JSON и минутный триггер больше не нужны. Для каждого нового или скопированного листа требуется отдельное подключение; переименование сохраняет привязку. Для другой связки создавайте новый лист.</p><p>Form ID необязателен: повреждённое значение исключается с предупреждением, заявка продолжает обработку. Lead ID и остальные ID должны быть точными строками. Утерянные цифры не восстанавливаются. Исходные значения и форматы мост не меняет. Ошибочные строки получают REVIEW; после исправления задайте RETRY. SENT означает приём ПП; CRM-статус приходит отдельно. При большой таблице проверка всех строк занимает несколько проходов.</p><p>В TikTok отдельно выберите эту таблицу и лист для Lead export, сопоставьте поля. Для Signal postback сопоставьте исходный TikTok Lead ID и TikTok Lead Status. Подключение Google к мосту не настраивает TikTok.</p>';
+    echo '<h3>Создание таблицы из связки</h3><p>Откройте сохранённую связку и нажмите «Создать Google-таблицу». Таблица появится в подключённом Google-аккаунте владельца и получит название связки. Шапка и служебные колонки создаются автоматически, ID и телефон в новой пустой таблице подготовлены как текст. Form ID не требуется. Привязка к связке сохранится, отправка останется на паузе. Откройте таблицу по ссылке, подключите её лист «Лиды» в TikTok Lead export и Signal postback, затем в карточке связки нажмите «Добавил таблицу в ТТ — запустить». Сервер начнёт читать строки без Apps Script и отдельного триггера. Уже поступивший тестовый лид также обрабатывается и может уйти в ПП. В карточке видны пауза, время последней проверки и ошибка; первый проход обычно начинается в течение минуты. Повторное нажатие не создаёт новую копию. При неподтверждённом создании сначала проверьте Google Drive и подключите найденную таблицу как существующую.</p><h3>Автоматическое подключение таблицы</h3><p>В «Подключение» нажмите «Подключить Google», затем «Выбрать таблицу». Выберите лист и свою связку. По умолчанию обрабатываются только новые заявки; старые строки можно включить явно. Подготовка не отправляет лиды. Отключите старый триггер Apps Script и включите отправку в Lead Bridge. Код, JSON и минутный триггер больше не нужны. Для каждого нового или скопированного листа требуется отдельное подключение; переименование сохраняет привязку. Для другой связки создавайте новый лист.</p><p>Form ID необязателен: повреждённое значение исключается с предупреждением, заявка продолжает обработку. Lead ID и остальные ID должны быть точными строками. Утерянные цифры не восстанавливаются. Исходные значения и форматы мост не меняет. Ошибочные строки получают REVIEW; после исправления задайте RETRY. SENT означает приём ПП; CRM-статус приходит отдельно. При большой таблице проверка всех строк занимает несколько проходов.</p><p>В TikTok отдельно выберите эту таблицу и лист для Lead export, сопоставьте поля. Для Signal postback сопоставьте исходный TikTok Lead ID и TikTok Lead Status. Подключение Google к мосту не настраивает TikTok.</p>';
     if(isAdmin())echo '<h3>Настройка Google для администратора</h3><p>В Google Cloud создайте проект, включите Google Sheets API, Google Drive API и Google Picker API. Настройте OAuth consent screen, разрешение https://www.googleapis.com/auth/drive.file и OAuth client типа Web application. Redirect URI: <code>'.h(googleCallbackUrl()).'</code>. Добавьте origin панели в Authorized JavaScript origins. Создайте API key для Picker, разрешите в API restrictions Google Picker API и Google Drive API, а в Websites — https://bridge.naturalsolution.help/* и https://docs.google.com/*. Все реквизиты должны относиться к одному проекту. В «Настройки → Google Sheets» сохраните Client ID, Client secret, API key и числовой номер проекта. Секрет шифруется на сервере и не показывается в браузере. Для постоянной работы внешнего приложения переведите consent screen в Production; в Testing refresh token для этого разрешения обычно истекает через 7 дней. При необходимости пройдите проверку Google. Google-аккаунт должен иметь право редактировать выбранную таблицу.</p>';
 }

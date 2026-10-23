@@ -194,22 +194,39 @@ function googleSourceControls(array $s): void {
     if(!$s['active'])echo '<p class="muted">После запуска будут обрабатываться новые строки'.($created?', включая уже поступивший тестовый лид TikTok':' согласно выбранному режиму импорта').'. Они могут создать клик Binom и заявку в ПП. Дополнительный триггер Google не нужен.</p>';
     else echo '<p class="muted">Первый проход обычно начинается в течение минуты; очередь таблиц может увеличить ожидание. Обновите страницу, чтобы увидеть время проверки и ошибки. Статусы появятся в служебных колонках таблицы.</p>';
 }
+function googleBuyerSteps(): void {
+    echo '<h3>Что нажимать баеру</h3><ol><li><strong>Один раз:</strong> добавьте свой Binom в «Трекеры» и аккаунт ПП в «Партнёрки». Доступы выдаёт администратор или менеджер.</li><li><strong>Для кампании:</strong> «Связки → Добавить». Укажите название, трекер, аккаунт ПП, ключ кампании Binom и API ID оффера. Проверьте нужные поля оффера, отметьте «Связка активна» и нажмите «Сохранить».</li><li><strong>Google:</strong> в сохранённой связке нажмите «Подключить мой Google-аккаунт» и войдите в свой Google. Если он уже подключён, переходите дальше.</li><li><strong>Таблица:</strong> нажмите «Создать Google-таблицу» и затем «Открыть созданную таблицу». Её название и привязка к связке сохранятся автоматически. Для готовой таблицы: «Подключить существующую таблицу» → «Выбрать таблицу» → файл и лист → «Подготовить подключение». Связка уже выбрана; по умолчанию старые строки пропускаются.</li><li><strong>TikTok:</strong> в Lead export выберите эту таблицу и лист «Лиды» (либо выбранный вами лист). Сопоставьте Lead ID → Lead ID, телефон → Phone, имя → Name и рекламные метки. Form ID можно пропустить. В Signal postback укажите Lead status → TikTok Lead Status, TikTok lead ID → исходный Lead ID.</li><li><strong>Запуск:</strong> вернитесь в эту же связку и нажмите «Добавил таблицу в ТТ — запустить». Для существующей таблицы — «Включить отправку», подтвердив отключение прежнего Apps Script. Уже поступивший тест TikTok тоже может создать клик и заявку в ПП.</li><li><strong>Проверка:</strong> через минуту обновите карточку: появится время проверки или ошибка. В таблице смотрите Webhook_Status, в мосте — «Журнал лидов». QUEUED — в очереди, SENT — ПП приняла, REVIEW — откройте причину в журнале. SENT ещё не означает апрув. Новые заявки обрабатываются автоматически; повторно нажимать запуск не нужно.</li></ol><p>Код и триггер в Google для этого способа не нужны. Для получения решений ПП настройте статусы в карточке аккаунта «Партнёрки»; они вернутся в таблицу и TikTok.</p>';
+}
 function googleRouteControls(string $routeId): void {
     googleSchema();$u=requireUser();uiEntity($routeId,'route');
-    echo '<h2>Google-таблица для связки</h2><p><a class="button secondary" href="?page=setup&amp;route='.h($routeId).'">Подключить таблицу автоматически</a></p>';
-    if(ownerOf($routeId)!==$u['id']){echo '<p>Новая таблица создаётся владельцем связки в его Google-аккаунте.</p>';return;}
-    googleReconnectForm($routeId);echo '<p class="muted">Переподключается ваш личный Google-аккаунт баера. После входа Google вернёт вас в эту связку. Создание таблицы автоматически не повторяется.</p>';
-    $op=sql('SELECT * FROM sheet_creations WHERE owner=? AND route=?',[$u['id'],$routeId])->fetch();
-    if($op){$d=unseal($op['data']);if(!empty($d['book']))echo '<p><a href="https://docs.google.com/spreadsheets/d/'.h($d['book']).'/edit" target="_blank" rel="noopener noreferrer">Открыть созданную таблицу ↗</a></p>';}
-    if($op&&$op['phase']==='ready'){
-        $source=sql('SELECT * FROM sheet_sources WHERE owner=? AND route=? AND spreadsheet=? AND sheet="0"',[$u['id'],$routeId,$d['book']??''])->fetch();
-        echo '<p>Таблица создана и привязана к этой связке. Выберите её и лист «Лиды» в TikTok, сопоставьте Lead ID, Phone и остальные поля, затем запустите обработку ниже.</p>';
-        if($source)googleSourceControls($source);else echo '<p role="alert">Подключение не найдено. Проверьте раздел «Подключение».</p>';return;
+    echo '<h2>Таблица и запуск</h2>';
+    if(ownerOf($routeId)!==$u['id']){echo '<p>Таблицу подключает владелец связки из своего аккаунта Lead Bridge.</p>';return;}
+    $connected=(bool)sql('SELECT 1 FROM google_accounts WHERE owner=?',[$u['id']])->fetchColumn();
+    $sources=sql('SELECT * FROM sheet_sources WHERE owner=? AND route=? ORDER BY rowid',[$u['id'],$routeId])->fetchAll();
+    $op=sql('SELECT * FROM sheet_creations WHERE owner=? AND route=?',[$u['id'],$routeId])->fetch();$d=$op?unseal($op['data']):[];
+    echo '<h3>1. Google-аккаунт</h3>';
+    if($connected)echo '<p>Ваш Google подключён.</p>';
+    else{
+        echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><input type="hidden" name="route" value="'.h($routeId).'"><button'.(googleReady()?'':' disabled').'>Подключить мой Google-аккаунт</button></form>';
+        echo '<p class="muted">Войдите в свой Google, в котором будет таблица.</p>';
+        if(!googleReady())echo '<p role="alert">Администратору нужно настроить Google-приложение в «Настройки» один раз для команды.</p>';
     }
-    if($op&&$op['phase']==='pending'){echo '<p role="alert">Результат создания не подтверждён. Проверьте Google Drive и подключите появившуюся таблицу как существующую. Автоматического повтора создания нет.</p>';return;}
-    $connected=googleReady()&&(bool)sql('SELECT 1 FROM google_accounts WHERE owner=?',[$u['id']])->fetchColumn();
-    echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_create"><input type="hidden" name="route" value="'.h($routeId).'"><button'.($connected?'':' disabled').'>'.($op&&$op['phase']==='created'?'Завершить подготовку таблицы':'Создать Google-таблицу').'</button></form><p class="muted">Название берётся из связки. Мост создаст лист «Лиды», шапку и служебные колонки и сохранит привязку. Отправка останется на паузе; затем выберите эту таблицу в TikTok.</p>';
-    if(!$connected)echo '<p><a href="?page=settings">Сначала подключите свой Google-аккаунт в настройках →</a></p>';
+    echo '<h3>2. Таблица для этой связки</h3>';
+    if($sources){
+        foreach($sources as $source){$c=unseal($source['data']);echo '<p><a class="button secondary" href="https://docs.google.com/spreadsheets/d/'.h($source['spreadsheet']).'/edit#gid='.h($source['sheet']).'" target="_blank" rel="noopener noreferrer">'.(googleCreatedSource($source)?'Открыть созданную таблицу':'Открыть таблицу').' ↗</a></p><p class="muted">Лист: '.h($c['title']).'</p>';}
+        echo '<p class="muted">Таблица уже привязана. Создавать её повторно не нужно.</p>';
+    }elseif($op&&in_array($op['phase'],['pending','ready'],true)){
+        if(!empty($d['book']))echo '<p><a href="https://docs.google.com/spreadsheets/d/'.h($d['book']).'/edit" target="_blank" rel="noopener noreferrer">Открыть созданную таблицу ↗</a></p>';
+        echo '<p role="alert">'.($op['phase']==='pending'?'Результат создания не подтверждён. Проверьте Google Drive и подключите появившуюся таблицу как существующую. Автоматического повтора создания нет.':'Подключение не найдено. Проверьте раздел «Подключение».').'</p>';
+    }else{
+        echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="google_create"><input type="hidden" name="route" value="'.h($routeId).'"><button'.($connected&&googleReady()?'':' disabled').'>'.($op&&$op['phase']==='created'?'Завершить подготовку таблицы':'Создать Google-таблицу').'</button></form><p class="muted">Название — как у связки. Лист «Лиды» и колонки подготовятся автоматически.</p>';
+    }
+    if(!$sources)echo '<p><a href="?page=setup&amp;route='.h($routeId).'">Подключить существующую таблицу →</a></p>';
+    echo '<h3>3. TikTok и отправка</h3>';
+    if(!$sources)echo '<p class="muted">Сначала подготовьте таблицу на шаге 2. Затем выберите её в TikTok и вернитесь сюда для запуска.</p>';
+    else foreach($sources as $source){if(count($sources)>1)echo '<h4>'.h(unseal($source['data'])['title']).'</h4>';googleSourceControls($source);}
+    echo '<details><summary>Что выбрать в TikTok</summary><p>В Lead export выберите таблицу из шага 2 и её подключённый лист. Сопоставьте Lead ID → Lead ID, телефон → Phone, имя → Name и рекламные метки. Form ID необязателен. Затем нажмите кнопку запуска выше.</p><p>Для обратных статусов в Signal postback: Lead status → TikTok Lead Status; TikTok lead ID → исходный Lead ID. Настройки статусов ПП — в аккаунте «Партнёрки».</p></details>';
+    echo '<details><summary>Доступ Google и другие таблицы</summary>';googleReconnectForm($routeId);echo '<p class="muted">Переподключается только ваш Google-аккаунт. Вы вернётесь в эту связку.</p><p><a href="?page=setup&amp;route='.h($routeId).'">Подключить таблицу автоматически / управление таблицами →</a></p></details>';
 }
 function googleConnectSource(string $owner,string $book,string $sheet,string $route,bool $history,?callable $http=null): string {
     googleSchema();if(ownerOf($route)!==$owner)throw new InvalidArgumentException('Таблица и связка должны принадлежать одному баеру');

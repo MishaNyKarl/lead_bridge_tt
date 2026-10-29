@@ -18,6 +18,8 @@ $GLOBALS['ops_http']=function($url,$body,$headers)use(&$token,$rsa,&$role,&$mode
     elseif(str_contains($url,'/credentials/read/'))$d=$credentials?['found'=>true]+$credentials:['found'=>false];
     elseif(str_contains($url,'/credentials/')){
         if($mode==='publish-fail')return ['code'=>409,'body'=>'{}'];
+        if($mode==='revoke-after-publish')$mode='deny';
+        if($mode==='promote-after-publish')$role='admin';
         $credentials=['local_user_id'=>$data['local_user_id'],'username'=>$data['username'],'password'=>$data['password']];$d=['saved'=>$mode!=='saved-false','credential_id'=>1,'credential_url'=>'/vault/accounts/1/'];
     }elseif(str_contains($url,'/session/'))$d=['issuer'=>OPSVAULT_ISSUER,'subject'=>'11111111-1111-4111-8111-111111111111','sid'=>$mode==='sid'?'wrong':'family','role'=>$role,'lease_token'=>'lease-token','expires_at'=>time()+300.5];
     elseif(str_contains($url,'/jobs/check/'))$d=['allowed'=>$mode!=='no-import','valid_for'=>60];
@@ -92,10 +94,22 @@ opsValidateReservation($user['id'],$result['subject']);
 denied(fn()=>opsValidateReservation('other_user',$result['subject']),'reservation protects local owner',OpsDenied::class);
 denied(fn()=>opsValidateReservation($user['id'],'22222222-2222-4222-8222-222222222222'),'reservation requires expected central subject',OpsDenied::class);
 sql('DELETE FROM sso_reservations');
-$mode='saved-false';denied(fn()=>opsProvision($result),'saved false rejected',OpsUnavailable::class);$credentials=[];$mode='normal';
-$new=opsProvision($result);$stored=$credentials;ok(password_verify($stored['password'],$new['password']),'JIT saves distinct password hash and vault card');
-$role='admin';$again=opsProvision(array_merge($result,['name'=>'renamed']));ok($again['id']===$new['id'],'nickname change reuses issuer subject binding');
-sql('DELETE FROM sso_links WHERE user_id=?',[$new['id']]);sql('DELETE FROM users WHERE id=?',[$new['id']]);$recovered=opsProvision($result);ok($recovered['id']===$new['id']&&password_verify($stored['password'],$recovered['password']),'publish plus rollback recovers canonical ID and password');
+$count=count($calls);$badResult=$result;$lease=opsOpen($result['lease']);$lease['subject']='other';$badResult['lease']=opsSeal($lease);
+denied(fn()=>opsProvision($badResult),'unrelated lease denied before vault access',OpsDenied::class);ok(count($calls)===$count,'unrelated lease sends no credentials request');
+$lease['subject']=$result['subject'];$lease['expires']=time()-1;$badResult['lease']=opsSeal($lease);
+denied(fn()=>opsProvision($badResult),'expired lease denied before vault access',OpsLoginRequired::class);ok(count($calls)===$count,'expired lease sends no credentials request');
+foreach(['deny','offline','unknown-role'] as $mode){$start=count($calls);denied(fn()=>opsProvision($result),'invalid policy prevents JIT publication');ok(count($calls)===$start+1,'policy failure never reads or publishes credentials');}
+$mode='revoke-after-publish';denied(fn()=>opsProvision($result),'revocation during publication rolls local creation back',OpsDenied::class);
+ok((int)sql('SELECT count(*) FROM users')->fetchColumn()===1,'revocation leaves no local account');
+$mode='normal';$canonical=$credentials;$resumed=opsProvision($result);ok($resumed['id']===$canonical['local_user_id']&&password_verify($canonical['password'],$resumed['password']),'retry reads published canonical credentials after policy rollback');
+sql('DELETE FROM sso_links WHERE user_id=?',[$resumed['id']]);sql('DELETE FROM users WHERE id=?',[$resumed['id']]);$credentials=[];
+$mode='saved-false';denied(fn()=>opsProvision($result),'saved false rejected',OpsUnavailable::class);$credentials=[];$mode='promote-after-publish';
+$new=opsProvision(array_merge($result,['name'=>$user['login']]));$stored=$credentials;ok(password_verify($stored['password'],$new['password']),'JIT saves distinct password hash and vault card');
+ok($new['role']==='admin'&&sql('SELECT role FROM users WHERE id=?',[$new['id']])->fetchColumn()==='admin','JIT stores fresh service grant role after publication');
+ok($new['id']!==$user['id']&&$new['login']!==$user['login'],'matching display nickname never claims an existing account');
+$role='user';$mode='normal';$again=opsProvision(array_merge($result,['name'=>'renamed']));ok($again['id']===$new['id'],'nickname change reuses issuer subject binding');
+sql('UPDATE users SET active=0 WHERE id=?',[$new['id']]);$inactive=opsProvision($result);ok(!$inactive['active'],'repeat OIDC never reactivates a disabled local account');sql('UPDATE users SET active=1 WHERE id=?',[$new['id']]);
+sql('DELETE FROM sso_links WHERE user_id=?',[$new['id']]);sql('DELETE FROM users WHERE id=?',[$new['id']]);$recovered=opsProvision($result);ok($recovered['id']===$new['id']&&password_verify($stored['password'],$recovered['password']),'publish plus rollback recovers canonical ID and password');ok($recovered['role']==='buyer','recovery uses current user grant without preserving former admin role');
 sql('DELETE FROM sso_links WHERE user_id=?',[$new['id']]);denied(fn()=>opsProvision($result),'canonical ID collision never claims another account',OpsDenied::class);
 $_COOKIE=['bridge_oidc'=>str_repeat('a',64)];$browser=opsBrowser();sql('INSERT INTO sso_attempts VALUES(?,?,?)',[$browser,opsSeal(['kind'=>'attempt']),time()+100]);ok(opsTakeAttempt()['kind']==='attempt','browser bound attempt consumed');denied('opsTakeAttempt','callback replay denied',OpsDenied::class);
 sql('INSERT INTO sso_attempts VALUES(?,?,?)',[$browser,opsSeal(['kind'=>'attempt']),time()-1]);denied('opsTakeAttempt','expired callback denied',OpsDenied::class);

@@ -217,7 +217,12 @@ function opsResult(object $client): array {
     if(($d['issuer']??'')!==OPSVAULT_ISSUER||($d['subject']??'')!==$claims->sub||($d['sid']??'')!==$claims->sid||!is_string($d['lease_token']??null)||strlen($d['lease_token'])<1||strlen($d['lease_token'])>1024||(!is_int($d['expires_at']??null)&&!is_float($d['expires_at']??null))||!is_finite((float)$d['expires_at'])||$d['expires_at']<=time())throw new OpsDenied('Сессия OpsVault не подтверждена');
     return ['subject'=>$claims->sub,'name'=>(string)($claims->preferred_username??$claims->name??$claims->sub),'role'=>opsRole($d),'lease'=>opsSeal(['token'=>$d['lease_token'],'subject'=>$claims->sub,'expires'=>$d['expires_at']])];
 }
-function opsLease(array $result): string {return opsOpen($result['lease'])['token'];}
+function opsLease(array $result): string {
+    $lease=opsOpen($result['lease']);
+    if(($lease['subject']??'')!==$result['subject'])throw new OpsDenied('Сессия OpsVault не подтверждена');
+    if(($lease['expires']??0)<=microtime(true))throw new OpsLoginRequired('Требуется вход в OpsVault');
+    return $lease['token'];
+}
 function opsSaveCredentials(array $result,array $user,string $password): void {
     $d=opsApi('credentials',['lease_token'=>opsLease($result),'subject'=>$result['subject'],'local_user_id'=>$user['id'],'username'=>$user['login'],'password'=>$password]);
     if(($d['saved']??null)!==true||!is_int($d['credential_id']??null)||$d['credential_id']<1||!is_string($d['credential_url']??null)||!str_starts_with($d['credential_url'],'/vault/accounts/')||str_starts_with($d['credential_url'],'//'))throw new OpsUnavailable('OpsVault не сохранил реквизиты');
@@ -231,7 +236,9 @@ function opsNewSession(array $user,array $result): void {
 function opsProvision(array $result): array {
     $row=sql('SELECT users.* FROM sso_links JOIN users ON users.id=sso_links.user_id WHERE issuer=? AND subject=?',[OPSVAULT_ISSUER,$result['subject']])->fetch();if($row)return $row;
     if(opsReserved($result['subject']))throw new OpsDenied('У вас уже есть аккаунт Lead Bridge. Войдите по его отдельному паролю и свяжите OpsVault в Настройках — данные сохранятся');
-    if(setting('sso_jit')!=='1')throw new OpsDenied('Сначала свяжите существующий аккаунт в Настройках');
+    if(setting('sso_jit')!=='1')throw new OpsDenied('Создание новых аккаунтов через OpsVault выключено. Обратитесь к администратору Lead Bridge');
+    // Do not publish credentials for a revoked grant or an unrelated/expired lease.
+    opsPolicy(['user_id'=>'','subject'=>$result['subject']],'oidc',['lease'=>$result['lease']],true);
     $d=opsApi('credentials/read',['lease_token'=>opsLease($result),'subject'=>$result['subject']]);
     if(($d['found']??null)===true){
         foreach(['local_user_id','username','password'] as $field)if(!is_string($d[$field]??null)||$d[$field]==='')throw new OpsUnavailable('Некорректные сохранённые реквизиты');
@@ -244,14 +251,15 @@ function opsProvision(array $result): array {
     // Canonical IDs never claim an unrelated pre-existing account after a rollback.
     if(sql('SELECT 1 FROM users WHERE id=? OR login=?',[$uid,$login])->fetchColumn())throw new OpsDenied('Коллизия аккаунта: требуется явная связь');
     if($d['found']===false)opsSaveCredentials($result,$u,$password);
-    opsPolicy(['user_id'=>$uid,'subject'=>$result['subject']],'oidc',['lease'=>$result['lease']],true);
     db()->exec('BEGIN IMMEDIATE');
     try{
         // Reservation may have appeared while credentials were being published.
         if(opsReserved($result['subject']))throw new OpsDenied('Аккаунт требует явной связи');
-        sql('INSERT INTO users VALUES(?,?,?,?,?,?,?)',[$uid,$login,$name,$u['password'],'buyer',1,$u['epoch']]);sql('INSERT INTO sso_links VALUES(?,?,?)',[$uid,OPSVAULT_ISSUER,$result['subject']]);db()->exec('COMMIT');
+        $policy=opsPolicy(['user_id'=>$uid,'subject'=>$result['subject']],'oidc',['lease'=>$result['lease']],true);
+        $u['role']=$policy['role'];
+        sql('INSERT INTO users VALUES(?,?,?,?,?,?,?)',[$uid,$login,$name,$u['password'],$u['role'],1,$u['epoch']]);sql('INSERT INTO sso_links VALUES(?,?,?)',[$uid,OPSVAULT_ISSUER,$result['subject']]);db()->exec('COMMIT');
     }
-    catch(Throwable $e){db()->exec('ROLLBACK');throw new OpsUnavailable('Не удалось создать аккаунт; повторный вход восстановит реквизиты');}
+    catch(Throwable $e){db()->exec('ROLLBACK');if($e instanceof OpsDenied||$e instanceof OpsUnavailable)throw $e;throw new OpsUnavailable('Не удалось создать аккаунт; повторный вход восстановит реквизиты');}
     return $u;
 }
 function opsReturnToPanel(string $target): never {
@@ -355,7 +363,7 @@ function opsSettings(): void {
     }
     echo '</div>';
     if(isAdmin()){
-        echo '<div class="card"><h2>Подключение OpsVault</h2><p>Callback: <code>'.h(opsCallbackUrl()).'</code><br>Выход: <code>'.h(rtrim(setting('base_url'),'/').'/').'</code></p><p>Серверные секреты: '.(opsReady()?'установлены':'не установлены полностью').'. Для связанных аккаунтов выключение входа закрывает и парольный доступ.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="ops_config">';input('sso_client_id','Client ID',setting('sso_client_id')?:'lead-bridge');input('sso_link_ids','Пилот: локальные ID через запятую',setting('sso_link_ids'),'text',false);echo '<label><input type="checkbox" name="sso_gate" '.(opsGate()?'checked':'').'>Разрешить вход OpsVault</label><label><input type="checkbox" name="sso_jit" '.(setting('sso_jit')==='1'?'checked':'').'>Разрешить создание новых аккаунтов (после приёмки)</label><button>Сохранить</button></form><p class="muted">Пилот: только связь существующих аккаунтов. Непривязанные пилотные пользователи получают доступ только к Настройкам для связи. Аварийные аккаунты выбираются на сервере.</p></div>';
+        echo '<div class="card"><h2>Подключение OpsVault</h2><p>Callback: <code>'.h(opsCallbackUrl()).'</code><br>Выход: <code>'.h(rtrim(setting('base_url'),'/').'/').'</code></p><p>Серверные секреты: '.(opsReady()?'установлены':'не установлены полностью').'. Для связанных аккаунтов выключение входа закрывает и парольный доступ.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="ops_config">';input('sso_client_id','Client ID',setting('sso_client_id')?:'lead-bridge');input('sso_link_ids','Пилот: локальные ID через запятую',setting('sso_link_ids'),'text',false);echo '<label><input type="checkbox" name="sso_gate" '.(opsGate()?'checked':'').'>Разрешить вход OpsVault</label><label><input type="checkbox" name="sso_jit" '.(setting('sso_jit')==='1'?'checked':'').'>Создавать аккаунт при первом разрешённом входе OpsVault</label><button>Сохранить</button></form><p class="muted">Новый пользователь с разрешением Lead Bridge в OpsVault входит без локальной регистрации, если создание аккаунтов включено. Зарезервированные существующие аккаунты требуют явной связи; до неё доступны только Настройки. Аварийные аккаунты выбираются на сервере.</p></div>';
         echo '<div class="card"><h2>Существующие аккаунты</h2><p>Зарезервируйте подтверждённую идентичность OpsVault для прежнего аккаунта. Тогда первый вход предложит явную связь и не создаст пустой дубликат. UUID выдаёт оператор OpsVault; имя и email для связи не используются.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="ops_reserve">';options('sso_local_user','Локальный аккаунт',accountOptions());input('sso_subject','UUID Identity OpsVault');echo '<button>Зарезервировать связь</button></form><div class="scroll"><table><tr><th>Локальный аккаунт</th><th>Identity OpsVault</th><th>Связь</th></tr>';
         foreach(sql('SELECT r.user_id,r.subject,u.login FROM sso_reservations r JOIN users u ON u.id=r.user_id WHERE r.issuer=? ORDER BY u.login',[OPSVAULT_ISSUER]) as $r){echo '<tr><td>'.h($r['login']).'</td><td>'.h($r['subject']).'</td><td>'.(opsLink($r['user_id'])?'Подтверждена':'Ожидает владельца');if(!opsLink($r['user_id']))echo '<form method="post">'.csrf().'<input type="hidden" name="op" value="ops_unreserve"><input type="hidden" name="sso_local_user" value="'.h($r['user_id']).'"><button class="secondary">Снять резерв</button></form>';echo '</td></tr>';}echo '</table></div></div>';
     }

@@ -54,6 +54,11 @@ $GLOBALS['ops_http']=function($url,$body,$headers){
  if(($d['action']??'')==='logout'){$m['mode']='deny';file_put_contents(home().'/mock.json',json_encode($m));}
  return $response(['role'=>$m['role'],'valid_for'=>60]);
 };
+if(isset($_GET['fixture_jit'])){
+ $m=json_decode(file_get_contents(home().'/mock.json'),true);
+ $m['subject']='55555555-5555-4555-8555-555555555555';$m['name']='BROWSER_NEW_USER';$m['role']='user';
+ file_put_contents(home().'/mock.json',json_encode($m));echo 'configured';exit;
+}
 if(isset($_GET['fixture_expire'])){
  startPanelSession();$lease=opsOpen($_SESSION['ops']['lease']);$lease['expires']=time()-1;$_SESSION['ops']['lease']=opsSeal($lease);echo 'expired';exit;
 }
@@ -212,7 +217,10 @@ try:
     vault = json.loads((work / 'mock-vault.json').read_text())[mock['subject']]
     passed(vault['local_user_id'] == new_uid and vault['username'] == new_login and vault['password'] != new_hash, 'new account credentials published with canonical local ID before commit')
     fresh.req(data=dict(op='logout')); passed(fresh.login(new_login, vault['password'])[0] == 200, 'generated separate credentials work with central local-access')
+    passed('OWN_TRACKER_a' not in fresh.req('?page=tracker')[1] and 'OWN_TRACKER_b' not in fresh.req('?page=tracker')[1], 'new buyer cannot see existing owners data')
+    configure(name='RENAMED_OPS_USER')
     fresh.req(data=dict(op='logout')); _, _, h = fresh.req('?opsvault=login', follow=False); fresh.callback(h)
+    passed(db.execute('SELECT user_id FROM sso_links WHERE subject=?', (mock['subject'],)).fetchone()[0] == new_uid and db.execute('SELECT password FROM users WHERE id=?', (new_uid,)).fetchone()[0] == new_hash, 'renamed identity retains local ID and password hash')
     passed(db.execute('SELECT count(*) FROM users').fetchone()[0] == 4, 'repeat OIDC login never creates a second local account')
     configure(subject='44444444-4444-4444-8444-444444444444', name='RESERVED_USER')
     db.execute('INSERT INTO sso_reservations VALUES(?,?,?)', ('buyer_b', 'https://portalwiki.world/sso', mock['subject'])); db.commit()
@@ -241,6 +249,7 @@ try:
                 if parsed.path != '/sso/authorize/': self.send_error(403); return
                 params = urllib.parse.parse_qs(parsed.query)
                 assert params['code_challenge_method'] == ['S256']
+                mock.update(json.loads((work / 'mock.json').read_text()))
                 configure(nonce=params['nonce'][0], challenge=params['code_challenge'][0])
                 location = base + '?opsvault=callback&' + urllib.parse.urlencode(dict(code='test-code', state=params['state'][0]))
                 # Commit an actual provider document before returning. An immediate redirect

@@ -69,8 +69,9 @@ test(googleToken('a')==='oauth-stub','OAuth grant stored for current owner');fai
 // Creation is exercised only against an in-memory Google stub.
 foreach(['new-route','uncertain-route','prepare-route','rejected-route','history-route'] as $rid){$r=$route;$r['name']='Название '.$rid;saveEntity($rid,'route',$r);sql('UPDATE entities SET owner="a" WHERE id=?',[$rid]);}
 $createCalls=0;$prepareCalls=0;$mode='ok';$lastBook='';$leadCount=sql('SELECT count(*) FROM leads')->fetchColumn();
-$creator=function($url,$body,$headers)use(&$createCalls,&$prepareCalls,&$mode,&$lastBook){
- test(in_array('Authorization: Bearer oauth-stub',$headers,true),'creation uses current buyer Google grant');$body=json_decode($body,true);
+$creatorToken='oauth-stub';
+$creator=function($url,$body,$headers)use(&$createCalls,&$prepareCalls,&$mode,&$lastBook,&$creatorToken){
+ test(in_array('Authorization: Bearer '.$creatorToken,$headers,true),'creation uses current buyer Google grant');$body=json_decode($body,true);
  if($url==='https://sheets.googleapis.com/v4/spreadsheets'){
   $createCalls++;test(str_starts_with($body['properties']['title'],'Название '),'spreadsheet title comes from route');test($body['sheets'][0]['properties']['gridProperties']['frozenRowCount']===1,'new header frozen');
   if($mode==='timeout')return ['code'=>0,'error'=>'transport','body'=>''];
@@ -131,3 +132,16 @@ $return=googleFinish(fn()=>['code'=>200,'error'=>'','body'=>json_encode(['access
 test($return==='?page=route&edit=new-route','OAuth reconnect returns to originating route');test(sql('SELECT phase FROM sheet_creations WHERE owner="a" AND route="uncertain-route"')->fetchColumn()===$phase,'reconnect never resets uncertain creation');test(googleToken('b')==='buyer-b-token','reconnect does not replace another buyer grant');
 $_SESSION['uid']='b';fails(fn()=>googleReturnPath('new-route'),'reconnect cannot target another buyer route');fails(fn()=>googleReturnPath('https://evil.example'),'OAuth return cannot be an arbitrary URL');$_SESSION['uid']='a';
 test(sql('PRAGMA integrity_check')->fetchColumn()==='ok','Google connector database integrity');
+
+$before=$createCalls;$oldBook=source($created)['spreadsheet'];$leadCountBeforeDetach=sql('SELECT count(*) FROM leads')->fetchColumn();
+$_SESSION['uid']='b';fails(fn()=>googleDetachSource($created),'buyer cannot detach a foreign table');$_SESSION['uid']='a';
+$_POST=['source'=>$created];fails(fn()=>googleMutation('google_detach'),'detach requires confirmation');
+test(googleDetachSource($created)==='new-route'&&!googleSourceActive($created)&&$createCalls===$before,'detach works without Google and stops old source');
+ob_start();googleRouteControls('new-route');$replacementUi=ob_get_clean();test(str_contains($replacementUi,'Создать Google-таблицу')&&!str_contains($replacementUi,$oldBook),'route offers creation after old table is detached');
+$replacementRoute=entity('new-route','route');$replacementRoute['name']='Название new-route';saveEntity('new-route','route',$replacementRoute);
+$creatorToken='reconnected';
+$mode='ok';$replacement=googleCreateForRoute('new-route',$creator);
+test($replacement!==$created&&source($replacement)['spreadsheet']!==$oldBook&&source($replacement)['active']==0,'replacement is a distinct paused table on the same route');
+fails(fn()=>googleDetachSource($created),'stale detach cannot change the replacement');
+test(googleCreateForRoute('new-route',$creator)===$replacement&&$createCalls===$before+1,'repeat create reuses replacement');
+test(sql('SELECT count(*) FROM leads')->fetchColumn()===$leadCountBeforeDetach&&source($created)['active']===GOOGLE_SOURCE_DETACHED,'replacement preserves lead history and old leaf reservation');

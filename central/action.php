@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.16.6';
+const BRIDGE_VERSION = '1.16.7';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -61,7 +61,7 @@ function deleteRoute(string $id): void {
     try{
         $route=uiEntity($id,'route');$route['active']=false;saveEntity($id,'route',$route);
         sql('INSERT INTO deleted_routes VALUES(?)',[$id]);
-        sql('UPDATE sheet_sources SET active=0 WHERE route=?',[$id]);
+        sql('UPDATE sheet_sources SET active=0 WHERE route=? AND active=1',[$id]);
         audit('delete_route',$id);opsRecheck();db()->exec('COMMIT');
     }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
 }
@@ -100,9 +100,9 @@ function normalize(array $a): array {
     return $r;
 }
 function result(array $l): array { $pp=sql('SELECT status,updated FROM partner_status WHERE lead=?',[$l['id']])->fetch();return ['partner_status'=>$pp?$pp['status']:'','partner_status_updated'=>$pp?$pp['updated']:'','status'=>$l['state']==='sent'?'success':(in_array($l['state'],['queued','click_ready','binom_pending','partner_pending'])?'processing':'review'),'stage'=>$l['state'],'lead_id'=>$l['external_id'],'click_id'=>$l['click_id'],'partner_reference_id'=>$l['partner_id'],'message'=>$l['message'],'receipt'=>$l['id']]; }
-function enqueue(string $routeId,array $route,array $input): array {
+function enqueue(string $routeId,array $route,array $input,string $sourceId=''): array {
     db()->exec('BEGIN IMMEDIATE');
-    try{$out=enqueueUnlocked($routeId,$route,$input);db()->exec('COMMIT');return $out;}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
+    try{if($sourceId!==''&&!googleSourceActive($sourceId))throw new InvalidArgumentException('Подключение таблицы остановлено');$out=enqueueUnlocked($routeId,$route,$input);db()->exec('COMMIT');return $out;}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
 }
 function enqueueUnlocked(string $routeId,array $route,array $input): array {
     $p=normalize($input); $id=hash('sha256',($route['dedupe_buyer']??$route['buyer']).'|tiktok|'.$p['lead_id']);

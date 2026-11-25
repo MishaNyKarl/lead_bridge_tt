@@ -1,5 +1,5 @@
 """Authorization regression tests; isolated DB and localhost server, no external requests."""
-import os,pathlib,tempfile,subprocess,socket,time,re,json,urllib.request,urllib.error,urllib.parse,sqlite3
+import html,os,pathlib,tempfile,subprocess,socket,time,re,json,urllib.request,urllib.error,urllib.parse,sqlite3
 root=pathlib.Path(__file__).resolve().parent
 work=pathlib.Path(tempfile.mkdtemp(prefix='bridge-accounts-test-'))
 env=dict(os.environ,BRIDGE_DATA=str(work),BRIDGE_ADMIN_PASSWORD='admin-test-password-123',BRIDGE_URL='https://bridge.example.com')
@@ -235,6 +235,25 @@ try:
  assert_ok('Запись не найдена или недоступна' in c.post(op='google_create',route='route_b')[1],'buyer cannot create table for foreign route')
  assert_ok(conn.execute('SELECT count(*) FROM sheet_creations').fetchone()[0]==0,'foreign route creates no pending operation')
  assert_ok(c.req('?page=setup&route=route_b')[0]==404,'foreign route context rejected on setup')
+ admin.post(op='google_config',client_id='test-client.apps.googleusercontent.com',client_secret='fixture-google-secret',picker_key='test-key',project='123')
+ route_page='?page=route&edit='+copies[-1]
+ c.req(route_page)
+ status,handoff=c.req(route_page,dict(csrf=c.csrf,op='google_begin',route=copies[-1]))
+ link=re.search(r'<a href="([^"]+)">Продолжить в Google</a>',handoff)
+ assert_ok(status==200 and link and 'location.replace(' in handoff,'Google starts with a local document and fallback link')
+ auth_url=urllib.parse.urlsplit(html.unescape(link.group(1)))
+ oauth=urllib.parse.parse_qs(auth_url.query)
+ assert_ok(auth_url.hostname=='accounts.google.com' and oauth['code_challenge_method']==['S256'] and oauth['prompt']==['consent select_account'],'Google handoff preserves OAuth checks')
+ state=oauth['state'][0]
+ callback='?'+urllib.parse.urlencode(dict(google='callback',state=state,error='access_denied'))
+ _,landing=Client().req(callback)
+ assert_ok('Продолжить в Lead Bridge' in landing,'Google callback landing works without a session cookie')
+ _,_,finish=landing.partition('href="')
+ finish=html.unescape(finish.split('"',1)[0])
+ assert_ok('Доступ Google не предоставлен' in c.req(finish)[1],'buyer sees consent refusal on return')
+ logs='\n'.join(line for line in (work/'server.log').read_text().splitlines() if 'Lead Bridge Google' in line)
+ assert_ok('oauth_handoff' in logs and 'oauth_callback_arrived' in logs and 'oauth_provider_error' in logs and 'fixture-google-secret' not in logs and state not in logs,'Google handoff and refusal events omit the OAuth secret')
+
  print('ALL ACCOUNT HTTP TESTS PASSED')
 finally:
  server.terminate();server.wait(timeout=10);log.close()

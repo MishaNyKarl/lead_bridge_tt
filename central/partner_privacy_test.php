@@ -14,10 +14,10 @@ try{
         foreach($type==='lemonad'?['webmaster']:['webmaster','agency'] as $mode){
             $partner=['type'=>$type,'account_type'=>$mode,'token'=>'fixture-token'];saveEntity('p','partner',$partner);saveEntity('r','route',$route);
             [$url,$json,$headers]=partnerRequest($partner,$route,$payload,'https://leadform.example.com','binom-click');$body=json_decode($json,true,512,JSON_THROW_ON_ERROR);
-            ok($body['utm_source']==='tiktok','TikTok source allowed '.$type.' '.$mode);
+            ok($type==='lemonad'?!array_key_exists('utm_source',$body):$body['utm_source']==='tiktok','Source matches partner policy '.$type.' '.$mode);
             foreach($forbidden as $value)ok(!str_contains($json,$value),'source detail withheld '.$type.' '.$mode);
             ok(!preg_match('/lead.?form|instant.?form|placement|form_id|advertiser_id/i',$json),'no form identifiers or descriptive markers '.$type.' '.$mode);
-            $keys=$type==='lemonad'?['offerId','name','phone','clickid','utm_source','utm_campaign','utm_content','utm_medium','utm_term']:['offer','ip','name','phone','subid','utm_source','utm_campaign','utm_content','utm_term','utm_medium','uuid','country','currency',...($mode==='agency'?['extu','exts']:['flow'])];
+            $keys=$type==='lemonad'?['offerId','name','phone','clickid','utm_campaign','utm_content','utm_medium','utm_term']:['offer','ip','name','phone','subid','utm_source','utm_campaign','utm_content','utm_term','utm_medium','uuid','country','currency',...($mode==='agency'?['extu','exts']:['flow'])];
             sort($keys);$actual=array_keys($body);sort($actual);ok($actual===$keys,'outgoing fields allowlist '.$type.' '.$mode);
             // Grouping must be stable for the same buyer and separate across buyers/fields.
             $changed=$payload;$changed['ad_name']='another instant form';$changed['lead_id']='223456789012345678901';

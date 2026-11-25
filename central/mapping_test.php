@@ -38,7 +38,7 @@ $mapped=$m;$mapped['tokens']=array_merge(defaultTokens(),['campaign_id'=>'CAMPAI
 foreach(['v1','v2'] as $version){$t=entity('t','tracker');$t['version']=$version;trackerClick($t,$mapped,$full,'https://bridge.example.com',function($url,$body,$headers)use($full,$mapped){parse_str(parse_url($url,PHP_URL_QUERY),$q);foreach($mapped['tokens'] as $field=>$parameter)if($parameter!=='')ok($q[$parameter]===($full[$field]??''),'exact-case encoded token '.$parameter);ok(!isset($q['campaign_id']),'lowercase campaign parameter not substituted');return ['code'=>200,'error'=>'','body'=>'{}'];});}
 foreach(['legacy','ids','all'] as $mode){
  $mapped['partner_meta_mode']=$mode;$body=partnerLeadBody($mapped,$full,'https://leadform.example.com','test-click');
- ok($body['utm_source']==='tiktok'&&$body['clickid']==='test-click'&&!isset($body['domain']),'Lemonad retains source and click without domain '.$mode);
+ ok(!array_key_exists('utm_source',$body)&&$body['clickid']==='test-click'&&!isset($body['domain']),'Lemonad retains click without source or domain '.$mode);
  ok(preg_match('/^[a-f0-9]{64}$/D',$body['utm_campaign'])&&$body['utm_campaign']!==$full['campaign_id']&&$body['utm_content']!==$full['ad_id'],'Lemonad campaign/ad aliases '.$mode);
  if($mode==='legacy')ok(!isset($body['utm_medium'],$body['utm_term']),'legacy mode keeps fewer aliases');
  else ok(preg_match('/^[a-f0-9]{64}$/D',$body['utm_term'])&&$body['utm_medium']!==$mapped['buyer'],'extended modes use aliases without metadata JSON '.$mode);

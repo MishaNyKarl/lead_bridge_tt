@@ -21,7 +21,7 @@ function overviewData(array $query,?DateTimeImmutable $now=null): array {
         if(!isset($routes[$row['route']]))$routes[$row['route']]=['owner'=>$row['owner']]+overviewEmpty();
         foreach($v as $k=>$value){$total[$k]+=$value;$daily[$row['day']][$k]+=$value;$buyers[$row['owner']][$k]+=$value;$routes[$row['route']][$k]+=$value;}
     }
-    $entities=uiEntities('route');foreach($routes as $id=>&$route)$route['name']=$entities[$id]['name']??'Связка';unset($route);
+    $entities=uiEntities('route',true);foreach($routes as $id=>&$route)$route['name']=$entities[$id]['name']??'Связка';unset($route);
     $active=0;foreach($entities as $id=>$route)if(($owner===''||ownerOf($id)===$owner)&&!empty($route['active']))$active++;
     $rank=in_array($query['rank']??'',['total','approved','review'],true)?$query['rank']:'total';
     $sort=fn($a,$b)=>($b[$rank]<=>$a[$rank])?:strcmp($a['name'],$b['name']);uasort($buyers,$sort);uasort($routes,$sort);

@@ -49,12 +49,14 @@ function requireUser(): array { $u=currentUser();if(!$u)throw new InvalidArgumen
 function isAdmin(): bool {return (currentUser()['role']??'')==='admin';}
 function requireAdmin(): void {if(!isAdmin())throw new InvalidArgumentException('Действие доступно только администратору');}
 function ownerOf(string $id): string {return (string)sql('SELECT owner FROM entities WHERE id=?',[$id])->fetchColumn();}
-function uiEntities(string $kind): array {
-    $u=requireUser();$q=isAdmin()?sql('SELECT id,data FROM entities WHERE kind=? ORDER BY rowid DESC',[$kind]):sql('SELECT id,data FROM entities WHERE kind=? AND owner=? ORDER BY rowid DESC',[$kind,$u['id']]);
-    $r=[];foreach($q as $row)$r[$row['id']]=unseal($row['data']);return $r;
+function uiEntities(string $kind,bool $includeDeleted=false): array {
+    $u=requireUser();$where='kind=?';$args=[$kind];
+    if(!isAdmin()){$where.=' AND owner=?';$args[]=$u['id'];}
+    if(!$includeDeleted)$where.=' AND id NOT IN (SELECT id FROM deleted_routes)';
+    $r=[];foreach(sql('SELECT id,data FROM entities WHERE '.$where.' ORDER BY rowid DESC',$args) as $row)$r[$row['id']]=unseal($row['data']);return $r;
 }
 function uiEntity(string $id,string $kind): array {
-    $u=requireUser();$q=sql('SELECT data,owner FROM entities WHERE id=? AND kind=?',[$id,$kind])->fetch();
+    $u=requireUser();$q=sql('SELECT data,owner FROM entities WHERE id=? AND kind=? AND id NOT IN (SELECT id FROM deleted_routes)',[$id,$kind])->fetch();
     if(!$q||(!isAdmin()&&$q['owner']!==$u['id']))throw new InvalidArgumentException('Запись не найдена или недоступна');return unseal($q['data']);
 }
 function leadScope(): array {
@@ -68,7 +70,7 @@ function accountOptions(): array {requireAdmin();$r=[];foreach(sql('SELECT id,lo
 function validOwner(string $id): void {if(!sql('SELECT 1 FROM users WHERE id=?',[$id])->fetchColumn())throw new InvalidArgumentException('Владелец не найден');}
 function migrateBuyerLogins(): void {
     db()->exec('BEGIN IMMEDIATE');
-    try{foreach(entities('route') as $id=>$r){$r['dedupe_buyer']=$r['dedupe_buyer']??$r['buyer'];$r['buyer']=buyerLogin(ownerOf($id));saveEntity($id,'route',$r);}db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
+    try{foreach(entities('route') as $id=>$r){if(routeDeleted($id))continue;$r['dedupe_buyer']=$r['dedupe_buyer']??$r['buyer'];$r['buyer']=buyerLogin(ownerOf($id));saveEntity($id,'route',$r);}db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
 }
 function assignRoute(string $routeId,string $owner): void {
     requireAdmin();validOwner($owner);$r=uiEntity($routeId,'route');

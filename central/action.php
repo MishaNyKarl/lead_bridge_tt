@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.16.5';
+const BRIDGE_VERSION = '1.16.6';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -12,6 +12,7 @@ function db(): PDO {
     $db->exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; PRAGMA foreign_keys=ON');
     $db->exec('CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY,v TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deleted_routes (id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS leads (id TEXT PRIMARY KEY,route TEXT NOT NULL,external_id TEXT NOT NULL,fingerprint TEXT NOT NULL,state TEXT NOT NULL,payload TEXT NOT NULL,snapshot TEXT NOT NULL,click_id TEXT NOT NULL DEFAULT "",partner_id TEXT NOT NULL DEFAULT "",message TEXT NOT NULL DEFAULT "",response TEXT NOT NULL DEFAULT "",created TEXT NOT NULL,updated TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS leads_created ON leads(created);
       CREATE INDEX IF NOT EXISTS leads_state ON leads(state,created);
@@ -50,7 +51,20 @@ function seal(array $a): string { $n=random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEB
 function unseal(string $s): array { $b=base64_decode($s,true); if ($b===false) throw new RuntimeException('Invalid encrypted data'); $v=sodium_crypto_secretbox_open(substr($b,24),substr($b,0,24),file_get_contents(home().'/master.key')); if ($v===false) throw new RuntimeException('Cannot decrypt data'); return json_decode($v,true,512,JSON_THROW_ON_ERROR); }
 function entities(string $kind): array { $r=[]; foreach(sql('SELECT id,data FROM entities WHERE kind=? ORDER BY rowid DESC',[$kind]) as $v) $r[$v['id']]=unseal($v['data']); return $r; }
 function entity(string $id,string $kind): array { $v=sql('SELECT data FROM entities WHERE id=? AND kind=?',[$id,$kind])->fetchColumn(); if (!$v) throw new InvalidArgumentException('Запись не найдена'); return unseal($v); }
-function saveEntity(string $id,string $kind,array $a): void { sql('INSERT INTO entities(id,kind,data) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE entities.kind=excluded.kind',[$id,$kind,seal($a)]); }
+function routeDeleted(string $id): bool {return (bool)sql('SELECT 1 FROM deleted_routes WHERE id=?',[$id])->fetchColumn();}
+function saveEntity(string $id,string $kind,array $a): void {
+    $q=sql('INSERT INTO entities(id,kind,data) SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM deleted_routes WHERE id=?) ON CONFLICT(id) DO UPDATE SET data=excluded.data WHERE entities.kind=excluded.kind',[$id,$kind,seal($a),$id]);
+    if(!$q->rowCount()&&routeDeleted($id))throw new InvalidArgumentException('Связка удалена');
+}
+function deleteRoute(string $id): void {
+    googleSchema();db()->exec('BEGIN IMMEDIATE');
+    try{
+        $route=uiEntity($id,'route');$route['active']=false;saveEntity($id,'route',$route);
+        sql('INSERT INTO deleted_routes VALUES(?)',[$id]);
+        sql('UPDATE sheet_sources SET active=0 WHERE route=?',[$id]);
+        audit('delete_route',$id);opsRecheck();db()->exec('COMMIT');
+    }catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}
+}
 function audit(string $event,string $id=''): void { sql('INSERT INTO audit(created,event,subject,actor) VALUES(?,?,?,?)',[gmdate('c'),$event,$id,$_SESSION['uid']??'system']); }
 require_once __DIR__.'/accounts.php'; // __ACCOUNTS_MODULE__
 require_once __DIR__.'/opsvault.php'; // __OPSVAULT_MODULE__
@@ -99,6 +113,7 @@ function enqueueUnlocked(string $routeId,array $route,array $input): array {
     // a new login-derived route bypassing their dedupe history. Serialized with insert.
     $owner=ownerOf($routeId);
     if($owner&&sql('SELECT 1 FROM leads l JOIN entities e ON e.id=l.route WHERE e.owner=? AND l.external_id=? LIMIT 1',[$owner,$p['lead_id']])->fetchColumn())throw new InvalidArgumentException('Этот Lead ID уже принят в другой связке вашего аккаунта');
+    if(routeDeleted($routeId))throw new InvalidArgumentException('Связка удалена');
     if(empty($route['active']))throw new InvalidArgumentException('Связка приостановлена');
     $tracker=entity($route['tracker'],'tracker'); $partner=entity($route['partner'],'partner');
     $ip=partnerIpSnapshot($partner,$route,$p);$partnerPayload=$p;if($ip['ip']!=='')$partnerPayload['ip']=$ip['ip'];
@@ -346,7 +361,7 @@ function api(): never {
         try{$r=entity($rid,'route');}catch(Throwable $e){jsonReply(['message'=>'Unauthorized'],401);}
         if(!is_string($secret)||strlen($secret)<32||!hash_equals($r['secret'],$secret))jsonReply(['message'=>'Unauthorized'],401);
         bridgeBackground(ownerOf($rid));
-        if(($a['op']??'')==='check')jsonReply(['status'=>'ok','active'=>(bool)$r['active'],'route'=>$r['name'],'version'=>BRIDGE_VERSION]);
+        if(($a['op']??'')==='check')jsonReply(['status'=>'ok','active'=>!routeDeleted($rid)&&(bool)$r['active'],'route'=>$r['name'],'version'=>BRIDGE_VERSION]);
         if(($a['op']??'')==='status') {
             $ids=$a['receipts']??[];if(!is_array($ids)||count($ids)>100)throw new InvalidArgumentException('Up to 100 receipts');$out=[];
             foreach($ids as $id){$l=sql('SELECT * FROM leads WHERE id=? AND route=?',[clean($id,64),$rid])->fetch();if($l)$out[$id]=result($l);}jsonReply(['results'=>$out]);
@@ -428,6 +443,10 @@ function mutate(): void {
         setting('postback_provider_'.$id,$provider);audit('postback_provider_'.$provider,$id);return;
     }
     if($op==='logout'){endPanelSession();redirect('?');}
+    if($op==='delete_route'){
+        if(($_POST['confirm_delete']??'')!=='yes')throw new InvalidArgumentException('Подтвердите удаление связки');
+        deleteRoute(required($_POST,'id',80));redirect('?page=route');
+    }
     if($op==='diagnose'){diagnose(required($_POST,'id'));return;}
     if($op==='save'){
         $kind=required($_POST,'kind');if(!in_array($kind,['tracker','partner','route'],true))throw new InvalidArgumentException('Invalid type');
@@ -655,6 +674,9 @@ function panel(): void {
 
                 mappingForm($v,!empty($v['tracker'])?uiEntity($v['tracker'],'tracker')['version']:'v2');echo '<label><input type="checkbox" name="active" '.(!empty($v['active'])?'checked':'').'>Связка активна'.fieldHelp('active','Связка активна').'</label>';}
             echo '<div class="actions"><button>Сохранить</button><a href="?page='.$page.'">К списку</a></div></form></div>';if($compactRoute)echo '</details>';
+            if($page==='route'&&$edit){
+                echo '<details class="card"'.(($_POST['op']??'')==='delete_route'?' open':'').'><summary>Удалить связку</summary><p>Связка исчезнет из списка, приём новых заявок и чтение привязанных листов остановятся. Уже принятые заявки останутся в журнале и закончат обработку. Файлы Google сохранятся. Восстановление из панели недоступно.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="delete_route"><input type="hidden" name="id" value="'.h($edit).'"><label><input type="checkbox" name="confirm_delete" value="yes" required> Подтверждаю удаление связки</label><button class="danger">Удалить связку</button></form></details>';
+            }
             if($page==='partner'&&$edit)postbackGuide($edit);
             if($page==='route'&&$edit){
                 echo '<details class="card"><summary>Дополнительно: диагностика и обслуживание</summary><details><summary>Проверка трекера</summary><p>Создаёт один технический клик с тестовыми метками. Заявка в партнёрку не отправляется.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="diagnose"><input type="hidden" name="id" value="'.h($edit).'"><button class="secondary">Проверить: создать тестовый клик</button></form>';
@@ -675,7 +697,7 @@ function panel(): void {
                 foreach($users as $uid=>$label)echo '<option value="'.h($uid).'" '.($owner===$uid?'selected':'').'>'.h($label).'</option>';
                 echo '</select></label>';[$sortKey,$sortDir]=tableSort(['created','external_id','route','state','click_id']);echo '<input type="hidden" name="sort" value="'.h($sortKey).'"><input type="hidden" name="dir" value="'.h($sortDir).'"><noscript><button>Показать</button></noscript></form>';
             }
-            echo '<div class="actions" style="margin-bottom:20px"><a class="button secondary" href="?page=leads'.h($ownerQuery.$sortQuery).'">Все</a><a class="button secondary" href="?page=leads&state=review'.h($ownerQuery.$sortQuery).'">Нужна проверка</a><a class="button secondary" href="?page=leads&state=sent'.h($ownerQuery.$sortQuery).'">Принятые</a></div><div class="card scroll"><table><tr>'.sortHeading('created','Время / дата · '.userTimezone(),['created','external_id','route','state','click_id']).sortHeading('external_id','Lead ID',['created','external_id','route','state','click_id']).sortHeading('route','Связка',['created','external_id','route','state','click_id']).sortHeading('state','Статус',['created','external_id','route','state','click_id']).sortHeading('click_id','Click ID',['created','external_id','route','state','click_id']).'</tr>';$where=$filter==='review'?"WHERE state IN ('binom_review','partner_review')":($filter==='sent'?"WHERE state='sent'":'');[$scope,$params]=leadScope();if($owner!==''){$scope.=" AND route IN (SELECT id FROM entities WHERE kind='route' AND owner=?)";$params[]=$owner;}$where.=($where?' AND ':'WHERE ').$scope;$routes=uiEntities('route');$rows=sql('SELECT * FROM leads '.$where.' ORDER BY '.leadOrder($routes).' LIMIT 50 OFFSET '.$offset,$params)->fetchAll();foreach($rows as $l)echo '<tr><td>'.h(displayDate($l['created'])).'</td><td><a href="?page=leads&id='.h($l['id']).'">'.h($l['external_id']).'</a></td><td>'.h($routes[$l['route']]['name']??$l['route']).'</td><td><span class="badge '.($l['state']==='sent'?'good':(str_contains($l['state'],'review')?'warn':'')).'">'.h($l['state']).'</span></td><td>'.h($l['click_id']).'</td></tr>';if(!$rows)echo '<tr><td colspan="5" class="muted">Лидов пока нет</td></tr>';echo '</table></div><div class="actions">';if($offset)echo '<a href="?page=leads&state='.h($filter).h($ownerQuery.$sortQuery).'&offset='.max(0,$offset-50).'">← Назад</a>';if(count($rows)===50)echo '<a href="?page=leads&state='.h($filter).h($ownerQuery.$sortQuery).'&offset='.($offset+50).'">Далее →</a>';echo '</div>';}
+            echo '<div class="actions" style="margin-bottom:20px"><a class="button secondary" href="?page=leads'.h($ownerQuery.$sortQuery).'">Все</a><a class="button secondary" href="?page=leads&state=review'.h($ownerQuery.$sortQuery).'">Нужна проверка</a><a class="button secondary" href="?page=leads&state=sent'.h($ownerQuery.$sortQuery).'">Принятые</a></div><div class="card scroll"><table><tr>'.sortHeading('created','Время / дата · '.userTimezone(),['created','external_id','route','state','click_id']).sortHeading('external_id','Lead ID',['created','external_id','route','state','click_id']).sortHeading('route','Связка',['created','external_id','route','state','click_id']).sortHeading('state','Статус',['created','external_id','route','state','click_id']).sortHeading('click_id','Click ID',['created','external_id','route','state','click_id']).'</tr>';$where=$filter==='review'?"WHERE state IN ('binom_review','partner_review')":($filter==='sent'?"WHERE state='sent'":'');[$scope,$params]=leadScope();if($owner!==''){$scope.=" AND route IN (SELECT id FROM entities WHERE kind='route' AND owner=?)";$params[]=$owner;}$where.=($where?' AND ':'WHERE ').$scope;$routes=uiEntities('route',true);$rows=sql('SELECT * FROM leads '.$where.' ORDER BY '.leadOrder($routes).' LIMIT 50 OFFSET '.$offset,$params)->fetchAll();foreach($rows as $l)echo '<tr><td>'.h(displayDate($l['created'])).'</td><td><a href="?page=leads&id='.h($l['id']).'">'.h($l['external_id']).'</a></td><td>'.h($routes[$l['route']]['name']??$l['route']).'</td><td><span class="badge '.($l['state']==='sent'?'good':(str_contains($l['state'],'review')?'warn':'')).'">'.h($l['state']).'</span></td><td>'.h($l['click_id']).'</td></tr>';if(!$rows)echo '<tr><td colspan="5" class="muted">Лидов пока нет</td></tr>';echo '</table></div><div class="actions">';if($offset)echo '<a href="?page=leads&state='.h($filter).h($ownerQuery.$sortQuery).'&offset='.max(0,$offset-50).'">← Назад</a>';if(count($rows)===50)echo '<a href="?page=leads&state='.h($filter).h($ownerQuery.$sortQuery).'&offset='.($offset+50).'">Далее →</a>';echo '</div>';}
     }elseif($page==='setup'){googleSetupPage();echo '<div class="card"><h2>Как читать статусы</h2><p>QUEUED — заявка сохранена на сервере; SENT — ПП подтвердила приём; REVIEW — нужна проверка. После исправления исходной строки задайте RETRY. Уже принятые заявки повторно не отправляются. CRM-статус приходит отдельно от ПП.</p><p>Обязательные колонки: Lead ID (или TikTok Lead ID) и Phone. Form ID необязателен. ID должны сохраняться точным текстом. Мост не меняет исходные значения и форматы. Полная инструкция — по кнопке «?».</p></div>';}
     elseif($page==='users'){accountsPage();}
     elseif($page==='settings'){

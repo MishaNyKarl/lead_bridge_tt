@@ -187,7 +187,7 @@ function googleWrite(string $owner,string $book,string $sheet,array $updates,?ca
 }
 function googleSource(string $id): array {
     googleSchema();$u=requireUser();$s=sql('SELECT * FROM sheet_sources WHERE id=?',[$id])->fetch();
-    if(!$s||(!isAdmin()&&$s['owner']!==$u['id']))throw new InvalidArgumentException('Подключение недоступно');return $s;
+    if(!$s||routeDeleted($s['route'])||(!isAdmin()&&$s['owner']!==$u['id']))throw new InvalidArgumentException('Подключение недоступно');return $s;
 }
 function googleCreateForRoute(string $routeId,?callable $http=null,string $attempt=''): string {
     googleSchema();$u=requireUser();$route=uiEntity($routeId,'route');$owner=$u['id'];
@@ -226,8 +226,8 @@ function googleCreateForRoute(string $routeId,?callable $http=null,string $attem
     $d=googleApi($owner,$book,':batchUpdate',['requests'=>$requests],$http,$attempt,$attempt!==''?'sheet_prepare_response':'');
     if(($d['spreadsheetId']??'')!==$book||count($d['replies']??[])!==count($requests))throw new InvalidArgumentException('Google не подтвердил подготовку. Повторное нажатие продолжит подготовку той же таблицы.');
     // Recheck ownership after external I/O; no incoming leads or clicks are created.
-    requireUser();bridgeBackground($owner);if(ownerOf($routeId)!==$owner)throw new InvalidArgumentException('Владелец связки изменился. Подключение не сохранено.');
-    sql('INSERT OR IGNORE INTO sheet_sources(id,owner,spreadsheet,sheet,route,data) VALUES(?,?,?,?,?,?)',[$id,$owner,$book,'0',$routeId,seal(['title'=>'Лиды','skip'=>[],'cursor'=>1])]);
+    requireUser();bridgeBackground($owner);if(ownerOf($routeId)!==$owner||routeDeleted($routeId))throw new InvalidArgumentException('Связка удалена или её владелец изменился. Подключение не сохранено.');
+    sql('INSERT OR IGNORE INTO sheet_sources(id,owner,spreadsheet,sheet,route,data) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM deleted_routes WHERE id=?)',[$id,$owner,$book,'0',$routeId,seal(['title'=>'Лиды','skip'=>[],'cursor'=>1]),$routeId]);
     $saved=sql('SELECT id FROM sheet_sources WHERE owner=? AND spreadsheet=? AND sheet="0" AND route=?',[$owner,$book,$routeId])->fetchColumn();
     if(!$saved)throw new InvalidArgumentException('Таблица уже подключена иначе. Проверьте список подключений.');
     sql('UPDATE sheet_creations SET phase="ready" WHERE owner=? AND route=?',[$owner,$routeId]);audit('sheet_created',$saved);return $saved;
@@ -298,7 +298,8 @@ function googleConnectSource(string $owner,string $book,string $sheet,string $ro
         if($limit>10000)throw new InvalidArgumentException('Для листа более 10 000 строк сначала подготовьте отдельный пустой лист');
         foreach(array_chunk(range(1,max(1,$limit-1)),200) as $chunk){$data=googleRows($owner,$book,$sheet,$chunk[0],end($chunk)+1,$http);foreach($data as $row){try{$v=googleValue($h,$row,['Lead ID','TikTok Lead ID'],true);if($v!=='')$skip[]=hash('sha256',$v);}catch(InvalidArgumentException $e){throw new InvalidArgumentException('В существующих строках есть повреждённый Lead ID. Исправьте его или подключите новый пустой лист.');}}}
     }
-    sql('INSERT INTO sheet_sources(id,owner,spreadsheet,sheet,route,data) VALUES(?,?,?,?,?,?)',[$id,$owner,$book,$sheet,$route,seal(['title'=>$tab['title'],'skip'=>$skip,'cursor'=>1])]);
+    $saved=sql('INSERT INTO sheet_sources(id,owner,spreadsheet,sheet,route,data) SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM deleted_routes WHERE id=?)',[$id,$owner,$book,$sheet,$route,seal(['title'=>$tab['title'],'skip'=>$skip,'cursor'=>1]),$route]);
+    if(!$saved->rowCount())throw new InvalidArgumentException('Связка удалена');
     audit('sheet_connected',$id);return $id;
 }
 function googleSyncSource(array $s,?callable $http=null): void {
@@ -315,7 +316,7 @@ function googleSyncSource(array $s,?callable $http=null): void {
     foreach($rows as $i=>$row){
         if(microtime(true)>$deadline){$next=$start+$i;break;}
         if(is_file((getenv('BRIDGE_CONTROL')?:home()).'/deploy.pause'))return;
-        if(!sql('SELECT 1 FROM sheet_sources WHERE id=? AND active=1',[$s['id']])->fetchColumn())return;
+        if(!sql('SELECT 1 FROM sheet_sources WHERE id=? AND active=1 AND route NOT IN (SELECT id FROM deleted_routes)',[$s['id']])->fetchColumn())return;
         $n=$start+$i;$writes=[];$put=function($k,$v)use(&$writes,$h,$n){$writes[]=[$n,array_search(googleHeaderKey($k),array_map('googleHeaderKey',$h),true),(string)$v];};
         try{
             $external=googleValue($h,$row,['Lead ID','TikTok Lead ID'],true);if($external==='')continue;
@@ -403,7 +404,7 @@ function googleMutation(string $op): bool {
             if(empty(entity($s['route'],'route')['active']))throw new InvalidArgumentException('Сначала включите связку и сохраните её, затем запустите таблицу');
         }
         // Explicit desired state makes a repeated POST harmless; no import or external send in this request.
-        if((int)$s['active']!==$enabled){sql('UPDATE sheet_sources SET active=?,next_at=0 WHERE id=?',[$enabled,$s['id']]);audit($enabled?'sheet_enabled':'sheet_paused',$s['id']);}
+        if((int)$s['active']!==$enabled){sql('UPDATE sheet_sources SET active=?,next_at=0 WHERE id=? AND route NOT IN (SELECT id FROM deleted_routes)',[$enabled,$s['id']]);audit($enabled?'sheet_enabled':'sheet_paused',$s['id']);}
     }else throw new InvalidArgumentException('Неизвестное действие Google');return true;
 }
 function googlePersonalSettings(): void {
@@ -435,7 +436,7 @@ function googleSetupPage(): void {
         echo '<details><summary>Управление доступом Google</summary><form method="post">'.csrf().'<input type="hidden" name="op" value="google_begin"><button class="secondary">Подключить Google заново</button></form><form method="post">'.csrf().'<input type="hidden" name="op" value="google_disconnect"><button class="secondary">Отключить Google и остановить мои таблицы</button></form></details>';
     }
     echo '</div>';
-    $sources=isAdmin()?sql('SELECT * FROM sheet_sources ORDER BY rowid DESC'):sql('SELECT * FROM sheet_sources WHERE owner=? ORDER BY rowid DESC',[$u['id']]);
+    $sources=isAdmin()?sql('SELECT * FROM sheet_sources WHERE route NOT IN (SELECT id FROM deleted_routes) ORDER BY rowid DESC'):sql('SELECT * FROM sheet_sources WHERE owner=? AND route NOT IN (SELECT id FROM deleted_routes) ORDER BY rowid DESC',[$u['id']]);
     foreach($sources as $s){$c=unseal($s['data']);$routeName=ownerOf($s['route'])===$s['owner']?entity($s['route'],'route')['name']:'Связка недоступна';echo '<div class="card"><h2>'.h($c['title']).'</h2><p><a href="https://docs.google.com/spreadsheets/d/'.h($s['spreadsheet']).'/edit#gid='.h($s['sheet']).'" target="_blank" rel="noopener noreferrer">Открыть таблицу ↗</a></p><p>Связка: '.h($routeName).'</p>';
         googleSourceControls($s);echo '</div>';
     }

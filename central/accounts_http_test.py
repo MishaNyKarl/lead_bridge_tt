@@ -254,6 +254,22 @@ try:
  logs='\n'.join(line for line in (work/'server.log').read_text().splitlines() if 'Lead Bridge Google' in line)
  assert_ok('oauth_handoff' in logs and 'oauth_callback_arrived' in logs and 'oauth_provider_error' in logs and 'fixture-google-secret' not in logs and state not in logs,'Google handoff and refusal events omit the OAuth secret')
 
+ assert_ok('Удалить связку' in c.req(route_page)[1],'delete available on route card')
+ c.req(route_page,dict(csrf=c.csrf,op='delete_route',id=copies[-1]))
+ a.post(op='delete_route',id=copies[-1],confirm_delete='yes')
+ c.req(route_page,dict(csrf='wrong',op='delete_route',id=copies[-1],confirm_delete='yes'))
+ assert_ok(conn.execute('SELECT count(*) FROM deleted_routes').fetchone()[0]==0,'delete requires confirmation, ownership and CSRF')
+ conn.execute('INSERT INTO sheet_sources(id,owner,spreadsheet,sheet,route,data,active) VALUES(?,?,?,?,?,?,1)',('fixture-source',uid,'private_fixture','0','route_a','unused'))
+ conn.commit()
+ c.post(op='delete_route',id='route_a',confirm_delete='yes')
+ assert_ok(c.req('?page=route&edit=route_a')[0]==404 and 'edit=route_a' not in c.req('?page=route')[1],'deleted route disappears from working pages')
+ assert_ok(conn.execute("SELECT active FROM sheet_sources WHERE id='fixture-source'").fetchone()[0]==0,'deleted route pauses its source')
+ assert_ok(c.req('?page=leads&id='+ids['route_a'])[0]==200,'route owner retains historical lead visibility')
+ api_headers={'Content-Type':'application/json','X-Bridge-Secret':route_data('route_a')['secret']}
+ status,body=Client().req(data=json.dumps({'route_id':'route_a','op':'check'}).encode(),headers=api_headers)
+ assert_ok(status==200 and json.loads(body)['active'] is False,'deleted route reports inactive')
+ status,body=Client().req(data=json.dumps({'route_id':'route_a','lead_id':'999999999','phone':'+254700000001'}).encode(),headers=api_headers)
+ assert_ok(status==400 and 'Связка удалена' in body and conn.execute('SELECT count(*) FROM leads').fetchone()[0]==len(ids),'deleted route cannot enqueue')
  print('ALL ACCOUNT HTTP TESTS PASSED')
 finally:
  server.terminate();server.wait(timeout=10);log.close()

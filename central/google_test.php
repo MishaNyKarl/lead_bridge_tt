@@ -145,3 +145,13 @@ test($replacement!==$created&&source($replacement)['spreadsheet']!==$oldBook&&so
 fails(fn()=>googleDetachSource($created),'stale detach cannot change the replacement');
 test(googleCreateForRoute('new-route',$creator)===$replacement&&$createCalls===$before+1,'repeat create reuses replacement');
 test(sql('SELECT count(*) FROM leads')->fetchColumn()===$leadCountBeforeDetach&&source($created)['active']===GOOGLE_SOURCE_DETACHED,'replacement preserves lead history and old leaf reservation');
+
+$previous=source($id);$previousConfig=unseal($previous['data']);$originalBook=$previous['spreadsheet'];$originalSheet=$previous['sheet'];
+googleDetachSource($id);
+fails(fn()=>googleConnectSource('a',$originalBook,$originalSheet,'history-route',true,$http),'detached leaf cannot transfer to another route');
+googleSaveAccount('a',['access_token'=>'TEST_ACCESS','refresh_token'=>'TEST_REFRESH','expires'=>time()+3600]);
+$restored=googleConnectSource('a',$originalBook,$originalSheet,'route',true,$http);
+$restoredSource=source($restored);$restoredConfig=unseal($restoredSource['data']);
+test($restored===$id&&$restoredSource['active']===0&&$restoredConfig['cursor']===1&&$restoredConfig['skip']===$previousConfig['skip'],'same route restores original source paused and preserves original import exclusions');
+test(sql('SELECT count(*) FROM leads')->fetchColumn()===$leadCountBeforeDetach,'reattaching never enqueues leads');
+test(googleCreatedSource(source($created)),'bridge-created file remains identifiable after its creation record is cleared');

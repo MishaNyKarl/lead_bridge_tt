@@ -1,5 +1,5 @@
 // Lead Bridge central connector. Read TikTok input without changing its values or formats.
-var BRIDGE_SCRIPT_VERSION='1.14.2';
+var BRIDGE_SCRIPT_VERSION='1.14.3';
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('Lead Bridge')
     .addItem('Настроить', 'bridgeConfigure')
@@ -133,9 +133,19 @@ function bridgeFormId(h,row) {
   try {return {value:bridgeMetaValue(h,row,hasText?names:['Form ID'],true),warning:''};}
   catch(error){return {value:'',warning:'Form ID повреждён или неоднозначен: поле не передано; отправка лида не блокируется. '+error.message};}
 }
-function bridgeMetadata(h,row,form) {
-  var fields={ip:['Client IP','IP Address','IP'],campaign_id:['Campaign ID'],adgroup_id:['Ad Group ID','Adgroup ID','Adset ID'],ad_id:['Ad ID'],advertiser_id:['Advertiser ID'],placement:['Placement'],campaign_name:['Campaign Name'],adgroup_name:['Ad Group Name','Adgroup Name','Adset Name','AID_NAME'],ad_name:['Ad Name','CID_NAME'],adid_v2:['ADID_V2'],adid_v2_name:['ADID_V2_NAME']};
-  var out={};Object.keys(fields).forEach(function(k){var v=bridgeMetaValue(h,row,fields[k],['campaign_id','adgroup_id','ad_id','advertiser_id','adid_v2'].indexOf(k)>=0);if(v!=='')out[k]=v;});
+function bridgeAdIds(h,row,warnings) {
+  var fields={campaign_id:['Campaign ID'],adgroup_id:['Ad Group ID','Adgroup ID','Adset ID'],ad_id:['Ad ID'],advertiser_id:['Advertiser ID'],adid_v2:['ADID_V2']};
+  var ids={};
+  Object.keys(fields).forEach(function(k){
+    try {var v=bridgeMetaValue(h,row,fields[k],true);if(v!=='')ids[k]=v;}
+    catch(error){warnings.push(fields[k][0]+' не передан: значение повреждено или неоднозначно');}
+  });
+  return ids;
+}
+function bridgeMetadata(h,row,form,ids) {
+  var fields={ip:['Client IP','IP Address','IP'],placement:['Placement'],campaign_name:['Campaign Name'],adgroup_name:['Ad Group Name','Adgroup Name','Adset Name','AID_NAME'],ad_name:['Ad Name','CID_NAME'],adid_v2_name:['ADID_V2_NAME']};
+  var out=ids||bridgeAdIds(h,row,[]);
+  Object.keys(fields).forEach(function(k){var v=bridgeMetaValue(h,row,fields[k],false);if(v!=='')out[k]=v;});
   form=form||bridgeFormId(h,row);if(form.value)out.form_id=form.value;return out;
 }
 function bridgeFormWarning(sheet,h,rowNum,warning,previous) {
@@ -186,13 +196,15 @@ function bridgeTick() {
         };
         if(!val('Phone'))continue; // Incomplete rows must never be skipped by the cursor.
         try {
-          var form=bridgeFormId(h,row);bridgeFormWarning(s,h,rowNum,form.warning,val('Bridge Warning'));
+          var form=bridgeFormId(h,row),warnings=form.warning?[form.warning]:[];
+          var ids=bridgeAdIds(h,row,warnings);bridgeFormWarning(s,h,rowNum,warnings.join(' · '),val('Bridge Warning'));
           var receipt=String(val('Bridge Receipt')||'');
           if(receipt){var poll=bridgeFetch(c,{op:'status',receipts:[receipt]});if(poll.code!==200||!poll.data.results||!poll.data.results[receipt])throw Error('Запись сервера не найдена: проверьте перенос/связку');apply(poll.data.results[receipt]);}
           else {
             var a=bridgeId(val('Lead ID')),b=bridgeId(val('TikTok Lead ID'));if(a&&b&&a!==b)throw Error('Колонки Lead ID расходятся');if(!a&&!b)continue;
             var body={lead_id:a||b,name:String(val('Name')||'Customer'),phone:bridgePhone(val('Phone'))};
-            var metadata=bridgeMetadata(h,row,form);Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
+            var metadata=bridgeMetadata(h,row,form,ids);
+            Object.keys(metadata).forEach(function(k){body[k]=metadata[k];});
             write('Webhook_Status','PROCESSING');SpreadsheetApp.flush();
             var r=bridgeFetch(c,body);
             if([200,202,409].indexOf(r.code)<0)throw Error(r.data.message||'HTTP '+r.code);

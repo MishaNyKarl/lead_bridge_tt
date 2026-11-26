@@ -176,10 +176,14 @@ function googlePayload(array $h,array $row): array {
     $p=['lead_id'=>googleValue($h,$row,['Lead ID','TikTok Lead ID'],true),'phone'=>googleValue($h,$row,['Phone']),'name'=>googleValue($h,$row,['Name'])?:'Customer'];
     if(preg_match('/[eE]/',$p['phone']))throw new InvalidArgumentException('Телефон повреждён');
     $p['phone']='+'.preg_replace('/^00/','',preg_replace('/[^0-9]/','',$p['phone']));
-    foreach(['campaign_id'=>['Campaign ID'],'adgroup_id'=>['Ad Group ID','Adgroup ID','Adset ID'],'ad_id'=>['Ad ID'],'advertiser_id'=>['Advertiser ID'],'adid_v2'=>['ADID_V2']] as $k=>$names){$v=googleValue($h,$row,$names,true);if($v!=='')$p[$k]=$v;}
+    $warnings=[];
+    foreach(['campaign_id'=>['Campaign ID'],'adgroup_id'=>['Ad Group ID','Adgroup ID','Adset ID'],'ad_id'=>['Ad ID'],'advertiser_id'=>['Advertiser ID'],'adid_v2'=>['ADID_V2']] as $k=>$names){
+        try{$v=googleValue($h,$row,$names,true);if($v!=='')$p[$k]=$v;}
+        catch(InvalidArgumentException $e){$warnings[]=$names[0].' не передан: значение повреждено или неоднозначно';}
+    }
     foreach(['ip'=>['Client IP','IP Address','IP'],'placement'=>['Placement'],'campaign_name'=>['Campaign Name'],'adgroup_name'=>['Ad Group Name','Adgroup Name','Adset Name','AID_NAME'],'ad_name'=>['Ad Name','CID_NAME'],'adid_v2_name'=>['ADID_V2_NAME']] as $k=>$names){$v=googleValue($h,$row,$names);if($v!=='')$p[$k]=$v;}
-    $warning='';try{$names=['Form ID text','Form ID text test'];$hasText=googleValue($h,$row,$names)!=='';$v=googleValue($h,$row,$hasText?$names:['Form ID'],true);if($v!=='')$p['form_id']=$v;}catch(InvalidArgumentException $e){$warning='Form ID не передан: значение повреждено или неоднозначно';}
-    return [normalize($p),$warning];
+    try{$names=['Form ID text','Form ID text test'];$hasText=googleValue($h,$row,$names)!=='';$v=googleValue($h,$row,$hasText?$names:['Form ID'],true);if($v!=='')$p['form_id']=$v;}catch(InvalidArgumentException $e){$warnings[]='Form ID не передан: значение повреждено или неоднозначно';}
+    return [normalize($p),implode(' · ',$warnings)];
 }
 function googleWrite(string $owner,string $book,string $sheet,array $updates,?callable $http=null,string $attempt=''): void {
     if(!$updates)return;$requests=[];

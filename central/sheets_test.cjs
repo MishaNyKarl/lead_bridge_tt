@@ -41,10 +41,12 @@ console.log('PASS: batch bound, rotating cursor, SENT status sync without phone 
 const extraHeaders=['PLACEMENT','CAMPAIGN_NAME','AID_NAME','CID_NAME','ADID_V2','ADID_V2_NAME'];
 rows=[headers.concat(extraHeaders),['9000000000000000005','+254700000001','Test','11','22','33','','','','','', 'TikTok','Campaign','Group','Ad','9000000000000000999','Separate']];
 e=env(rows,body=>{assert.equal(body.placement,'TikTok');assert.equal(body.campaign_name,'Campaign');assert.equal(body.adgroup_name,'Group');assert.equal(body.ad_name,'Ad');assert.equal(body.adid_v2,'9000000000000000999');assert.equal(body.adid_v2_name,'Separate');assert.notEqual(body.ad_id,body.adid_v2);return {code:202,data:{status:'processing',stage:'queued',receipt:'extra'}};});e.ctx.bridgeTick();assert.equal(rows[1][6],'QUEUED');
-assert.throws(()=>e.ctx.bridgeMetadata(['Campaign ID','CAMPAIGN_ID'],['11','22']),/Разные значения/);
+const conflictingWarnings=[];
+assert.equal(e.ctx.bridgeAdIds(['Campaign ID','CAMPAIGN_ID'],['11','22'],conflictingWarnings).campaign_id,undefined);
+assert.match(conflictingWarnings[0],/Campaign ID/);
 assert.equal(e.ctx.bridgeMetadata(['Client IP'],['8.8.8.8']).ip,'8.8.8.8');
 assert.equal(e.ctx.bridgeMetadata(['IP Address'],['2001:4860:4860::8888']).ip,'2001:4860:4860::8888');
-assert.throws(()=>e.ctx.bridgeMetadata(['ADID_V2'],[9000000000000000999]),/округлён/);
+assert.equal(e.ctx.bridgeMetadata(['ADID_V2'],[9000000000000000999]).adid_v2,undefined);
 console.log('PASS all optional metadata, independent V2 values, conflicting aliases and unsafe V2 ID rejected');
 
 // Forms use different routes/secrets and keep independent receipts and status cursors.
@@ -166,13 +168,17 @@ const originalRange=e.sheets[0].getRange;
 e.sheets[0].getRange=function(...args){const range=originalRange.apply(this,args);range.setFontColor=()=>{throw Error('Protected');};return range;};
 e.ctx.console={error(){}};e.ctx.bridgeTick();assert.equal(protectedRow[1][protectedRow[0].indexOf('Webhook_Status')],'QUEUED');
 assert.match(protectedRow[1][protectedRow[0].indexOf('Bridge Warning')],/Form ID/);
-// Unsafe required Lead ID and other metadata IDs still block, even with a bad Form ID.
+// Unsafe Lead ID blocks. Optional numeric IDs are omitted and reported.
 for(const bad of ['Lead ID','Campaign ID','Ad ID','Ad Group ID','Advertiser ID','ADID_V2']){
   const input=[['Lead ID','Phone','Form ID',...(bad==='Lead ID'?[]:[bad])],['1','+254700000001','7.69907E+18',...(bad==='Lead ID'?[]:[9000000000000000123])]];
   if(bad==='Lead ID')input[1][0]=9000000000000000123;
-  e=env(input,()=>{throw Error('Unsafe identity must not send');});e.ctx.bridgeTick();assert.equal(input[1][input[0].indexOf('Webhook_Status')],'REVIEW');
+  let sent=0;
+  e=env(input,body=>{sent++;assert.equal(body.lead_id,'1');assert.equal(body.phone,'+254700000001');assert.equal(body[{ 'Campaign ID':'campaign_id','Ad ID':'ad_id','Ad Group ID':'adgroup_id','Advertiser ID':'advertiser_id','ADID_V2':'adid_v2'}[bad]],undefined);return {code:202,data:{status:'processing',receipt:'optional-id'}};});
+  e.ctx.bridgeTick();assert.equal(sent,bad==='Lead ID'?0:1);
+  assert.equal(input[1][input[0].indexOf('Webhook_Status')],bad==='Lead ID'?'REVIEW':'QUEUED');
+  if(bad!=='Lead ID')assert.ok(input[1][input[0].indexOf('Bridge Warning')].includes(bad));
 }
-console.log('PASS: optional malformed/conflicting/missing/exact Form IDs, warning cleanup, protected styling, required and other ID checks remain strict');
+console.log('PASS: optional malformed/conflicting/missing/exact Form IDs, warning cleanup, protected styling, required ID remains strict');
 
 // New text-column names support deployed test sheets and take explicit per-row priority.
 for(const name of ['Form ID text','Form ID text test','FORM_ID_TEXT']){

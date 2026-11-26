@@ -51,6 +51,8 @@ $writeBefore=count($writes);fails(fn()=>googleSyncSource(source($id),$http),'mov
 test($moved,'row move scenario exercised');
 // Foreign receipt cannot read a lead from another route or owner.
 $grid[4]=row(['1000000000000000005','Replacement','+254700000005','']);$grid[4]['values'][$receiptCol]=cell($lead['id']);googleSyncSource(source($id),$http);test(googleCell($grid[4]['values'][array_search('Webhook_Status',$h,true)])==='REVIEW','foreign receipt rejected');
+[$minimal,$notes]=googlePayload(['Lead ID','Name','Phone','Campaign ID','Ad Group ID','Ad ID','Advertiser ID','ADID_V2'],row(['123','Buyer','+254700000006',9.1e18,'7.3E+18','456',9.2e18,9.3e18]));
+test($minimal['lead_id']==='123'&&$minimal['name']==='Buyer'&&$minimal['phone']==='+254700000006'&&$minimal['ad_id']==='456'&&$minimal['campaign_id']===''&&$minimal['adgroup_id']===''&&$minimal['advertiser_id']===''&&!isset($minimal['adid_v2'])&&str_contains($notes,'Campaign ID')&&str_contains($notes,'ADID_V2'),'damaged optional ad IDs do not block delivery and valid fields are kept');
 $bad=row([9.123456789e18,'Bad','+254700000006','']);fails(fn()=>googlePayload($h,$bad),'numeric Lead ID rejected without rounding');
 [$p,$warning]=googlePayload(['Lead ID','Phone','Form ID'],row(['9000000000000000001','+254700000001','9000000000000000123']));test($p['form_id']==='9000000000000000123'&&$warning==='','exact form preserved');
 test(normalize(['lead_id'=>'1','phone'=>'+254700000001','form_id'=>9.123e18])['form_id']==='','API accepts lead without valid optional form');

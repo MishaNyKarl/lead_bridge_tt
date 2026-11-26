@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 // Lead Bridge: PHP 8.2+, curl, pdo_sqlite, sodium. The only public application file.
-const BRIDGE_VERSION = '1.16.11';
+const BRIDGE_VERSION = '1.17.0';
 function home(): string { return getenv('BRIDGE_DATA') ?: '/var/lib/lead-bridge'; }
 function db(): PDO {
     static $db, $pid;
@@ -72,6 +72,7 @@ require_once __DIR__.'/ui.php'; // __UI_MODULE__
 require_once __DIR__.'/overview.php'; // __OVERVIEW_MODULE__
 require_once __DIR__.'/partner_poll.php'; // __POLL_MODULE__
 require_once __DIR__.'/google_sheets.php'; // __GOOGLE_MODULE__
+require_once __DIR__.'/tiktok.php'; // __TIKTOK_MODULE__
 function clean(mixed $v,int $max=250): string { if (!is_string($v)||strlen($v)>$max||preg_match('/[\x00-\x1F\x7F]/',$v)) throw new InvalidArgumentException('Некорректное текстовое поле'); return trim($v); }
 function required(array $a,string $k,int $max=250): string { $v=clean($a[$k]??'',$max); if($v==='') throw new InvalidArgumentException('Заполните поле: '.$k); return $v; }
 function publicUrl(string $url): string {
@@ -436,7 +437,7 @@ function mutate(): void {
         db()->exec('BEGIN IMMEDIATE');try{accountMutation($op);opsRecheck();db()->exec('COMMIT');}catch(Throwable $e){db()->exec('ROLLBACK');throw $e;}return;
     }
     if(accountMutation($op))return;
-    if(googleMutation($op))return;
+    if(googleMutation($op)||tiktokMutation($op,$me))return;
     if($op==='postback_provider'){
         $id=required($_POST,'id',80);uiEntity($id,'partner');$provider=required($_POST,'postback_provider',30);
         if(!isset(postbackProviders()[$provider]))throw new InvalidArgumentException('Неизвестная партнёрка');
@@ -555,6 +556,10 @@ HTML;
     <ul><li><strong>QUEUED</strong> — заявка сохранена, ожидает обработки.</li><li><strong>SENT</strong> — ПП подтвердила приём. Это ещё не апрув.</li><li><strong>REVIEW</strong> — нужна сверка ошибки в журнале; не создавайте новую строку с другим ID для повторной отправки.</li><li><strong>RETRY</strong> — повторная проверка с тем же Lead ID; при сохранённой квитанции проверяется уже существующая заявка.</li></ul>
     <p>Если TikTok Lead Status пустой — проверьте доставку постбэка на мост и состояние синхронизации листа. Строки SENT получают статусы ПП без повторной отправки заявки. Для старых лидов запросите повтор постбэка в ПП. Если заявка есть в ПП, а конверсии нет в Binom — проверьте отдельный постбэк ПП → Binom.</p>
     </details>
+    <details><summary>Прямое подключение TikTok</summary>
+      <p>Администратор сохраняет App ID и App Secret в «Настройки → Приложение TikTok». Адрес возврата указан там же. После одобрения приложения откройте «TikTok → Подключить TikTok» и подтвердите доступ к нужным рекламным кабинетам. Мост добавит все кабинеты, которые вернул TikTok. Для другого набора кабинетов нажмите «Добавить кабинеты или обновить доступ».</p>
+      <p>Выберите кабинет и нажмите «Загрузить формы». На этом этапе доступны просмотр опубликованных форм и проверка прав. Подписки на лиды и отправка статусов ещё не подключены.</p>
+    </details>
   </div>
 </dialog>
 HTML;
@@ -599,8 +604,21 @@ function panel(): void {
     if($auth&&!empty($_SESSION['google_connected_notice'])){
         unset($_SESSION['google_connected_notice']);$notice='Google подключён. Теперь можно повторить создание или подключение таблицы.';
     }
+    if(($_GET['tiktok']??'')==='finish'&&$_SERVER['REQUEST_METHOD']==='GET'){
+        try{
+            tiktokFinish();
+            $_SESSION['tiktok_flash']=['notice'=>'Доступ к кабинетам TikTok сохранён.'];
+        }catch(InvalidArgumentException $e){$_SESSION['tiktok_flash']=['error'=>$e->getMessage()];}
+        catch(Throwable $e){$_SESSION['tiktok_flash']=['error'=>'Не удалось подключить TikTok. Начните подключение заново.'];}
+        redirect('?page=tiktok');
+    }
+    if(($_GET['page']??'')==='tiktok'&&isset($_SESSION['tiktok_flash'])){
+        $notice=$_SESSION['tiktok_flash']['notice']??$notice;
+        $error=$_SESSION['tiktok_flash']['error']??$error;
+        unset($_SESSION['tiktok_flash']);
+    }
     if($auth)refreshPanelSession();
-    $page=$_GET['page']??'overview';$titles=['overview'=>'Обзор','route'=>'Связки','tracker'=>'Трекеры','partner'=>'Партнёрки','leads'=>'Журнал лидов','setup'=>'Подключение','settings'=>'Настройки'];
+    $page=$_GET['page']??'overview';$titles=['overview'=>'Обзор','route'=>'Связки','tracker'=>'Трекеры','partner'=>'Партнёрки','leads'=>'Журнал лидов','setup'=>'Подключение','tiktok'=>'TikTok','settings'=>'Настройки'];
     if($auth&&!empty(currentUser()['sso_migration']))$page='settings';
     if($auth&&isAdmin())$titles['users']='Аккаунты';
     if($auth&&$page==='users'&&!isAdmin()){http_response_code(403);echo 'Доступ запрещён';return;}
@@ -699,9 +717,10 @@ function panel(): void {
             }
             echo '<div class="actions" style="margin-bottom:20px"><a class="button secondary" href="?page=leads'.h($ownerQuery.$sortQuery).'">Все</a><a class="button secondary" href="?page=leads&state=review'.h($ownerQuery.$sortQuery).'">Нужна проверка</a><a class="button secondary" href="?page=leads&state=sent'.h($ownerQuery.$sortQuery).'">Принятые</a></div><div class="card scroll"><table><tr>'.sortHeading('created','Время / дата · '.userTimezone(),['created','external_id','route','state','click_id']).sortHeading('external_id','Lead ID',['created','external_id','route','state','click_id']).sortHeading('route','Связка',['created','external_id','route','state','click_id']).sortHeading('state','Статус',['created','external_id','route','state','click_id']).sortHeading('click_id','Click ID',['created','external_id','route','state','click_id']).'</tr>';$where=$filter==='review'?"WHERE state IN ('binom_review','partner_review')":($filter==='sent'?"WHERE state='sent'":'');[$scope,$params]=leadScope();if($owner!==''){$scope.=" AND route IN (SELECT id FROM entities WHERE kind='route' AND owner=?)";$params[]=$owner;}$where.=($where?' AND ':'WHERE ').$scope;$routes=uiEntities('route',true);$rows=sql('SELECT * FROM leads '.$where.' ORDER BY '.leadOrder($routes).' LIMIT 50 OFFSET '.$offset,$params)->fetchAll();foreach($rows as $l)echo '<tr><td>'.h(displayDate($l['created'])).'</td><td><a href="?page=leads&id='.h($l['id']).'">'.h($l['external_id']).'</a></td><td>'.h($routes[$l['route']]['name']??$l['route']).'</td><td><span class="badge '.($l['state']==='sent'?'good':(str_contains($l['state'],'review')?'warn':'')).'">'.h($l['state']).'</span></td><td>'.h($l['click_id']).'</td></tr>';if(!$rows)echo '<tr><td colspan="5" class="muted">Лидов пока нет</td></tr>';echo '</table></div><div class="actions">';if($offset)echo '<a href="?page=leads&state='.h($filter).h($ownerQuery.$sortQuery).'&offset='.max(0,$offset-50).'">← Назад</a>';if(count($rows)===50)echo '<a href="?page=leads&state='.h($filter).h($ownerQuery.$sortQuery).'&offset='.($offset+50).'">Далее →</a>';echo '</div>';}
     }elseif($page==='setup'){googleSetupPage();echo '<div class="card"><h2>Как читать статусы</h2><p>QUEUED — заявка сохранена на сервере; SENT — ПП подтвердила приём; REVIEW — нужна проверка. После исправления исходной строки задайте RETRY. Уже принятые заявки повторно не отправляются. CRM-статус приходит отдельно от ПП.</p><p>Обязательные колонки: Lead ID (или TikTok Lead ID) и Phone. Form ID необязателен. ID должны сохраняться точным текстом. Мост не меняет исходные значения и форматы. Полная инструкция — по кнопке «?».</p></div>';}
+    elseif($page==='tiktok'){tiktokPage();}
     elseif($page==='users'){accountsPage();}
     elseif($page==='settings'){
-        opsSettings();googlePersonalSettings();googleSettings();
+        opsSettings();googlePersonalSettings();googleSettings();tiktokSettings();
         if(isAdmin())scriptNoticeControls();
         echo '<div class="card"><h2>Часовой пояс</h2><p class="muted">Время в журнале лидов и последних действиях отображается в выбранном часовом поясе. Настройка действует только для вашего аккаунта.</p><form method="post">'.csrf().'<input type="hidden" name="op" value="timezone">';options('timezone','Часовой пояс',['Europe/Moscow'=>'Europe/Moscow (Москва, UTC+3)','UTC'=>'UTC (UTC+0)'],userTimezone());echo '<button>Сохранить часовой пояс</button></form></div>';
 
@@ -767,6 +786,7 @@ function main(): void {
         header('Referrer-Policy: strict-origin');header(googlePickerCsp());
     }
     if(($_GET['google']??'')==='callback'&&$_SERVER['REQUEST_METHOD']==='GET')googleLanding();
+    if(($_GET['tiktok']??'')==='callback'&&$_SERVER['REQUEST_METHOD']==='GET')tiktokLanding();
     if(isset($_GET['postback']))postback();
     if(isset($_GET['health']))jsonReply(['status'=>'online','version'=>BRIDGE_VERSION]);
     if($_SERVER['REQUEST_METHOD']==='POST'&&str_starts_with(strtolower($_SERVER['CONTENT_TYPE']??''),'application/json'))api();

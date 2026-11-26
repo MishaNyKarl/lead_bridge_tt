@@ -157,3 +157,19 @@ $restoredSource=source($restored);$restoredConfig=unseal($restoredSource['data']
 test($restored===$id&&$restoredSource['active']===0&&$restoredConfig['cursor']===1&&$restoredConfig['skip']===$previousConfig['skip'],'same route restores original source paused and preserves original import exclusions');
 test(sql('SELECT count(*) FROM leads')->fetchColumn()===$leadCountBeforeDetach,'reattaching never enqueues leads');
 test(googleCreatedSource(source($created)),'bridge-created file remains identifiable after its creation record is cleared');
+
+$now=time();$due=$now-180;
+sql('UPDATE sheet_sources SET active=0 WHERE active=1');
+sql('UPDATE sheet_sources SET active=1,next_at=?,checked="" WHERE id=?',[$due,$id]);
+$otherRoute=$route;saveEntity('quota-other-route','route',$otherRoute);sql('UPDATE entities SET owner="b" WHERE id="quota-other-route"');
+sql('INSERT INTO sheet_sources(id,owner,spreadsheet,sheet,route,data,active,next_at) VALUES(?,?,?,?,?,?,1,?)',['quota-other-source','b','quota_other_book','0','quota-other-route',seal(['title'=>'Other']),$now-60]);
+setting('google_tick_a',(string)($now+60));setting('google_tick_b','0');
+$calls=[];$quotaStub=function($url)use(&$calls){$calls[]=$url;return ['code'=>403,'error'=>'','body'=>'{"error":{"message":"fixture"}}'];};
+googleTick($quotaStub);
+test(count($calls)===1&&str_contains($calls[0],'quota_other_book'),'buyer cooling down does not block another buyer');
+test(source($id)['next_at']===$due&&source($id)['checked']==='','quota cooldown preserves original queue position');
+sql('UPDATE sheet_sources SET active=0 WHERE id="quota-other-source"');
+$second=source($replacement);
+sql('UPDATE sheet_sources SET active=1,next_at=?,checked="" WHERE id=?',[$now-30,$second['id']]);
+setting('google_tick_a','0');googleTick($quotaStub);
+test(count($calls)===2&&str_contains($calls[1],$book)&&source($id)['checked']!==''&&source($second['id'])['checked']==='','oldest due table wins after buyer cooldown');

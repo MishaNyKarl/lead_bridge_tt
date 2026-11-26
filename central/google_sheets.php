@@ -406,10 +406,16 @@ function googleSyncSource(array $s,?callable $http=null): void {
     sql('UPDATE sheet_sources SET data=?,checked=?,error="",next_at=? WHERE id=?',[seal($conf),gmdate('c'),time()+60,$s['id']]);
 }
 function googleTick(?callable $http=null): void {
-    googleSchema();$s=sql('SELECT * FROM sheet_sources WHERE active=1 AND next_at<=? ORDER BY next_at,id LIMIT 1',[time()])->fetch();if(!$s)return;
-    // Share the per-user Sheets quota across all their sources.
-    if((int)setting('google_tick_'.$s['owner'])>time()){sql('UPDATE sheet_sources SET next_at=? WHERE id=?',[(int)setting('google_tick_'.$s['owner']),$s['id']]);return;}
-    setting('google_tick_'.$s['owner'],(string)(time()+60));
+    googleSchema();$now=time();
+    // Preserve the original due time while a buyer's quota is cooling down.
+    // Rewriting it creates ties that can repeatedly favor the same sheet ID.
+    $s=sql('SELECT s.* FROM sheet_sources s
+      LEFT JOIN settings q ON q.k=(?||s.owner)
+      WHERE s.active=1 AND s.next_at<=? AND COALESCE(CAST(q.v AS INTEGER),0)<=CAST(? AS INTEGER)
+        AND s.route NOT IN (SELECT id FROM deleted_routes)
+      ORDER BY s.next_at,s.id LIMIT 1',['google_tick_',$now,$now])->fetch();
+    if(!$s)return;
+    setting('google_tick_'.$s['owner'],(string)($now+60));
     try{googleSyncSource($s,$http);}catch(Throwable $e){sql('UPDATE sheet_sources SET checked=?,error=?,next_at=? WHERE id=?',[gmdate('c'),$e instanceof InvalidArgumentException?$e->getMessage():'Ошибка синхронизации Google. Повторное чтение через 5 минут.',time()+300,$s['id']]);}
 }
 function googleWorkerTick(): void {
